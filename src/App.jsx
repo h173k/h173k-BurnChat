@@ -21,6 +21,7 @@ import {
   checkBiometricSupport, isBiometricSetup, setupBiometric, authenticateBiometric, removeBiometric,
 } from './crypto/auth'
 import { useBurnChat } from './hooks/useBurnChat'
+import { getReferralFromURL, generateReferralLink } from './referral'
 import { useChatWallet } from './hooks/useChatWallet'
 import { useTokenPrice, formatLastUpdated } from './usePrice'
 import {
@@ -45,6 +46,7 @@ const Icon = {
   share: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V3"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>,
   plusSquare: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>,
   dots: <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>,
+  qr: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/></svg>,
 }
 
 /* ============================================================ */
@@ -215,6 +217,18 @@ export default function App() {
   )
 
   useEffect(() => {
+    // Influencer links: ?ref=<solana address> pre-sets the burn/listen address
+    // so anyone opening the link burns to that address. Persisted, then stripped
+    // from the URL so a later manual change isn't undone on reload.
+    const ref = getReferralFromURL()
+    if (ref) {
+      saveBurnAddress(ref)
+      try {
+        const url = new URL(window.location.href)
+        url.searchParams.delete('ref')
+        window.history.replaceState({}, '', url.toString())
+      } catch {}
+    }
     if (!walletExists() || !isPINSetup()) setAppState('onboard')
     else setAppState('locked')
   }, [])
@@ -513,6 +527,7 @@ function PinPrompt({ title, subtitle, onSubmit, onCancel }) {
 function Main({ connection, onRpcChange, onLock }) {
   const isMobile = useIsMobile()
   const [view, setView] = useState('chat') // chat | settings
+  const [showReceive, setShowReceive] = useState(false)
   const [settings, setSettings] = useState(getChatSettings())
   const [burnAddress, setBurnAddress] = useState(getBurnAddress())
   const [fxMessage, setFxMessage] = useState(null)
@@ -608,6 +623,9 @@ function Main({ connection, onRpcChange, onLock }) {
         <div style={{ display: 'flex', gap: 8 }}>
           {!settings.watchOnly && view === 'chat' && !isMobile && <button className="icon-btn" onClick={() => chat.refresh()} title="Reload">{Icon.refresh}</button>}
           {!settings.watchOnly && view === 'chat' && (
+            <button className="icon-btn" onClick={() => setShowReceive(true)} title="Receive — show address QR">{Icon.qr}</button>
+          )}
+          {!settings.watchOnly && view === 'chat' && (
             <button className="icon-btn" onClick={() => setView('settings')} title="Settings">{Icon.gear}</button>
           )}
           {settings.watchOnly && view === 'chat' && (
@@ -641,6 +659,7 @@ function Main({ connection, onRpcChange, onLock }) {
       )}
 
       {fxMessage && <BurnFx message={fxMessage} settings={settings} price={price} onClose={() => setFxMessage(null)} />}
+      {showReceive && <ReceiveModal pubkey={pubkey} onClose={() => setShowReceive(false)} />}
       {toast && <div className={`toast ${toast.kind}`}>{toast.msg}</div>}
     </div>
   )
@@ -868,6 +887,35 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
 }
 
 /* ---------------- Deposit prompt (inline, dismissible) ---------------- */
+/* Address QR + copy, opened from the header button. */
+function ReceiveModal({ pubkey, onClose }) {
+  const addr = pubkey ? pubkey.toString() : ''
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    navigator.clipboard?.writeText(addr)
+    setCopied(true); setTimeout(() => setCopied(false), 1500)
+  }
+  return (
+    <div className="sol-prompt-overlay" onClick={onClose}>
+      <div className="sol-prompt-card" onClick={e => e.stopPropagation()}>
+        <button className="prompt-close" onClick={onClose} title="Close" aria-label="Close">{Icon.close}</button>
+        <h2 style={{ marginBottom: 8 }}>Receive</h2>
+        <p style={{ marginBottom: 18 }}>Transfer <b>h173k</b> or <b>Solana (SOL)</b> to this address.</p>
+        <div className="qr-code-container" style={{ display: 'flex', justifyContent: 'center' }}>
+          {addr && <QRCodeGenerator data={addr} size={190} />}
+        </div>
+        <div className="sol-prompt-value" onClick={copy} style={{ marginTop: 16 }}>
+          {addr}<span className="copy-hint">{copied ? 'copied ✓' : 'tap to copy'}</span>
+        </div>
+        <button className="btn btn-secondary" onClick={copy} style={{ width: '100%', marginTop: 14 }}>
+          {copied ? 'Copied ✓' : 'Copy address'}
+        </button>
+        <p className="sol-prompt-note" style={{ marginTop: 12 }}>Only send h173k or SOL on Solana mainnet to this address.</p>
+      </div>
+    </div>
+  )
+}
+
 function DepositPrompt({ pubkey, onClose }) {
   const addr = pubkey ? pubkey.toString() : ''
   const [copied, setCopied] = useState(false)
@@ -949,6 +997,18 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
   const [nick, setNick] = useState(settings.nickname)
   const [addr, setAddr] = useState(burnAddress)
   const [addrErr, setAddrErr] = useState('')
+  // Share/referral link — defaults to the user's own address so their followers'
+  // burns flow to them. Editable in case they receive on a different wallet.
+  const [refAddr, setRefAddr] = useState(pubkey ? pubkey.toString() : '')
+  const [refCopied, setRefCopied] = useState(false)
+  const refValid = useMemo(() => { try { new PublicKey(refAddr.trim()); return true } catch { return false } }, [refAddr])
+  const refLink = refValid ? generateReferralLink(refAddr.trim()) : ''
+  const copyRefLink = () => {
+    if (!refValid) return
+    navigator.clipboard?.writeText(refLink)
+    setRefCopied(true)
+    setTimeout(() => setRefCopied(false), 2000)
+  }
   const [rpc, setRpc] = useState(getRpcEndpoint())
   const [rpcMsg, setRpcMsg] = useState('')
   const [rep, setRep] = useState(getReplenishSettings())
@@ -1051,6 +1111,34 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
           {addrErr && <span className="form-hint" style={{ color: 'var(--color-error)' }}>{addrErr}</span>}
           <span className="form-hint">Default: {truncateAddress(DEFAULT_BURN_ADDRESS, 8, 8)}</span>
           <button className="convert-sol-btn" style={{ marginTop: 8 }} onClick={() => { setAddr(DEFAULT_BURN_ADDRESS); setBurnAddress(DEFAULT_BURN_ADDRESS) }}>Reset to default</button>
+        </div>
+      </div>
+
+      {/* Share / referral link */}
+      <div className="settings-section">
+        <h3>Share link</h3>
+        <div className="referral-link-section">
+          <p className="referral-description">
+            Share this link. Anyone who opens it has their burn address set to the address below,
+            so their burns go to that account. Defaults to your own address.
+          </p>
+          <div className="form-group">
+            <label className="form-label">Receiving address</label>
+            <input className="form-input" value={refAddr} onChange={e => setRefAddr(e.target.value)}
+              spellCheck={false} autoCapitalize="none" />
+            {!refValid && refAddr.trim() && <span className="form-hint" style={{ color: 'var(--color-error)' }}>Not a valid Solana address</span>}
+          </div>
+          {refValid && (
+            <>
+              <div className="referral-link-box" onClick={copyRefLink}>
+                <span className="referral-link-text">{refLink}</span>
+                <span style={{ flex: '0 0 auto', color: 'var(--color-white-70)' }}>{Icon.copy}</span>
+              </div>
+              <button className="btn btn-secondary referral-copy-btn" onClick={copyRefLink}>
+                {refCopied ? 'Copied ✓' : 'Copy link'}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
