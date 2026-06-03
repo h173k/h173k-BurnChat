@@ -15,7 +15,7 @@ import {
   MIN_TRIGGER_THRESHOLD, MIN_REPLENISH_TO, MIN_SWAP_PRIORITY_FEE,
 } from './constants'
 import {
-  generateMnemonic, validateMnemonic, importWallet, walletExists, deleteWallet, sessionWallet,
+  generateMnemonic, validateMnemonic, importWallet, walletExists, deleteWallet, sessionWallet, changePassword,
 } from './crypto/wallet'
 import {
   isPINSetup, setupPIN, verifyPIN,
@@ -525,6 +525,60 @@ function PinPrompt({ title, subtitle, onSubmit, onCancel }) {
     </div>
   )
 }
+
+/* Change PIN: verify current, enter new twice. Re-encrypts the seed with the
+   new PIN (the PIN is the seed's encryption key) and updates the auth hash. If
+   biometric was enabled it's reset, since the old PIN was bound to it. */
+function ChangePinModal({ onClose, onDone }) {
+  const [step, setStep] = useState('old') // old | new | confirm
+  const [pin, setPin] = useState('')
+  const [oldPin, setOldPin] = useState('')
+  const [newPin, setNewPin] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const titles = { old: 'Enter current PIN', new: 'Choose a new PIN', confirm: 'Confirm new PIN' }
+
+  const press = async (d) => {
+    if (busy || pin.length >= 6) return
+    const next = pin + d
+    setPin(next)
+    if (next.length < 6) return
+
+    if (step === 'old') {
+      try { verifyPIN(next); setOldPin(next); setStep('new'); setPin(''); setErr('') }
+      catch (e) { setErr(e.message || 'Wrong PIN'); setPin('') }
+    } else if (step === 'new') {
+      setNewPin(next); setStep('confirm'); setPin(''); setErr('')
+    } else {
+      if (next !== newPin) { setErr('PINs do not match — start again'); setPin(''); setNewPin(''); setStep('new'); return }
+      setBusy(true)
+      try {
+        changePassword(oldPin, next) // re-encrypt seed with the new PIN
+        setupPIN(next)               // update auth PIN hash
+        let bioReset = false
+        if (isBiometricSetup()) { removeBiometric(); bioReset = true }
+        onDone(bioReset)
+      } catch (e) {
+        setErr(e.message || 'Could not change PIN'); setPin(''); setOldPin(''); setNewPin(''); setStep('old')
+      } finally { setBusy(false) }
+    }
+  }
+  const del = () => { if (!busy) setPin(p => p.slice(0, -1)) }
+
+  return (
+    <div className="sol-prompt-overlay" onClick={busy ? undefined : onClose}>
+      <div className="sol-prompt-card" onClick={e => e.stopPropagation()}>
+        <h2 className="lock-title" style={{ marginBottom: 20 }}>{titles[step]}</h2>
+        <div className="pin-display">{[0,1,2,3,4,5].map(i => <div key={i} className={`pin-dot ${i < pin.length ? 'filled' : ''}`} />)}</div>
+        {err && <div className="error-message">{err}</div>}
+        <PinPad onPress={press} onDelete={del} disabled={busy} />
+        <button className="btn btn-secondary" style={{ marginTop: 12, width: '100%' }} onClick={onClose} disabled={busy}>Cancel</button>
+      </div>
+    </div>
+  )
+}
+
 function Main({ connection, onRpcChange, onLock }) {
   const isMobile = useIsMobile()
   const [view, setView] = useState('chat') // chat | settings
@@ -1032,6 +1086,9 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
   const [bioOn, setBioOn] = useState(isBiometricSetup())
   const [showBioPin, setShowBioPin] = useState(false)
   const [bioMsg, setBioMsg] = useState('')
+  // Change PIN
+  const [showChangePin, setShowChangePin] = useState(false)
+  const [pinMsg, setPinMsg] = useState('')
 
   useEffect(() => {
     let alive = true
@@ -1280,6 +1337,8 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
           <div className="settings-item"><span className="dim">Biometrics not available on this device</span></div>
         )}
         {bioMsg && <div className="form-hint" style={{ padding: '0 4px' }}>{bioMsg}</div>}
+        <div className="settings-item" onClick={() => setShowChangePin(true)}><span>Change PIN</span><span className="arrow">›</span></div>
+        {pinMsg && <div className="form-hint" style={{ padding: '0 4px' }}>{pinMsg}</div>}
         <div className="settings-item" onClick={onLock}><span>Lock now</span><span className="arrow">›</span></div>
       </div>
 
@@ -1307,6 +1366,18 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
           subtitle="Enter your current PIN to link biometric unlock to this account."
           onSubmit={enableBiometric}
           onCancel={() => setShowBioPin(false)}
+        />
+      )}
+
+      {showChangePin && (
+        <ChangePinModal
+          onClose={() => setShowChangePin(false)}
+          onDone={(bioReset) => {
+            setShowChangePin(false)
+            if (bioReset) setBioOn(false)
+            setPinMsg(bioReset ? 'PIN changed ✓ — re-enable biometric unlock' : 'PIN changed ✓')
+            setTimeout(() => setPinMsg(''), 5000)
+          }}
         />
       )}
     </div>
