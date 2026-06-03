@@ -50,6 +50,16 @@ const Icon = {
 /* ============================================================ */
 
 /* ---------- platform helpers ---------- */
+
+/* Normalize free-typed decimal input: locale comma → dot, strip junk, keep a
+   single dot. Used by every numeric field so comma-decimal keyboards work. */
+function sanitizeDecimal(raw) {
+  let v = String(raw).replace(/,/g, '.').replace(/[^0-9.]/g, '')
+  const i = v.indexOf('.')
+  if (i !== -1) v = v.slice(0, i + 1) + v.slice(i + 1).replace(/\./g, '')
+  return v
+}
+
 function isStandalonePWA() {
   return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
     || window.navigator.standalone === true
@@ -783,12 +793,7 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
   // Normalize the amount field ourselves. type="number" silently blanks out
   // comma input on comma-decimal locales (e.g. PL/DE keyboards), so the burn
   // button never lit up. We accept commas and convert them to a dot.
-  const onAmount = (raw) => {
-    let v = raw.replace(/,/g, '.').replace(/[^0-9.]/g, '')
-    const i = v.indexOf('.')
-    if (i !== -1) v = v.slice(0, i + 1) + v.slice(i + 1).replace(/\./g, '')
-    setAmount(v)
-  }
+  const onAmount = (raw) => setAmount(sanitizeDecimal(raw))
 
   const submit = async () => {
     setErr('')
@@ -949,6 +954,15 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
   const [rep, setRep] = useState(getReplenishSettings())
   const [repEnabled, setRepEnabled] = useState(getReplenishEnabled())
   const [decimals, setDecimals] = useState(h173kDecimals)
+  // Local string buffer for the decimal filter so users can type "0." / "0,5"
+  // without the parsed number snapping the field back mid-entry.
+  const [minBurnStr, setMinBurnStr] = useState(settings.minBurnFilter ? String(settings.minBurnFilter) : '')
+  const onMinBurn = (raw) => {
+    const v = sanitizeDecimal(raw)
+    setMinBurnStr(v)
+    const n = parseFloat(v)
+    updateSettings({ minBurnFilter: isNaN(n) ? 0 : Math.max(0, n) })
+  }
   const [confirmDelete, setConfirmDelete] = useState(false)
   // Biometric unlock
   const [bioSupported, setBioSupported] = useState(false)
@@ -1057,8 +1071,8 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         </div>
         <div className="form-group">
           <label className="form-label">Only show burns ≥ (h173k)</label>
-          <input className="form-input" type="number" min="0" step="any" value={settings.minBurnFilter}
-            onChange={e => updateSettings({ minBurnFilter: Math.max(0, parseFloat(e.target.value || '0')) })} />
+          <input className="form-input" type="text" inputMode="decimal" autoComplete="off" placeholder="0"
+            value={minBurnStr} onChange={e => onMinBurn(e.target.value)} />
         </div>
         <div className="form-group">
           <label className="form-label">h173k decimals shown</label>
