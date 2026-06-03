@@ -42,12 +42,162 @@ const Icon = {
   close: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
   eye: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
   fingerprint: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 11c0 4-1 7-2 9"/><path d="M5.8 8.5A7 7 0 0 1 19 11c0 1 0 2-.2 3"/><path d="M8 11a4 4 0 0 1 8 0c0 4-.5 6-1 8"/><path d="M3.5 11a8.5 8.5 0 0 1 2-5.5"/><path d="M17.5 18.5c.3-1 .5-2.5.5-4.5"/><path d="M12 11v1c0 5-1 8-2.5 10.5"/></svg>,
+  share: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V3"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>,
+  plusSquare: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>,
+  dots: <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>,
+}
+
+/* ============================================================ */
+
+/* ---------- platform helpers ---------- */
+function isStandalonePWA() {
+  return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+    || window.navigator.standalone === true
+    || document.referrer.startsWith('android-app://')
+}
+
+function isMobileDevice() {
+  const ua = navigator.userAgent || ''
+  const phoneUA = /Android.*Mobile|iPhone|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua)
+  const coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
+  return phoneUA || (coarse && window.innerWidth <= 820)
+}
+
+function isIOSDevice() {
+  return /iPhone|iPad|iPod/i.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) // iPadOS reports as Mac
+}
+
+function useIsMobile() {
+  const [mobile, setMobile] = useState(isMobileDevice)
+  useEffect(() => {
+    const onChange = () => setMobile(isMobileDevice())
+    window.addEventListener('resize', onChange)
+    window.addEventListener('orientationchange', onChange)
+    return () => {
+      window.removeEventListener('resize', onChange)
+      window.removeEventListener('orientationchange', onChange)
+    }
+  }, [])
+  return mobile
+}
+
+/* Pull-to-refresh on the document scroller. Active only when the page is at the
+   very top; drags down past a threshold trigger onRefresh. Returns the current
+   pull offset (px) and a refreshing flag so the caller can draw an indicator. */
+function usePullToRefresh({ enabled, onRefresh }) {
+  const [pull, setPull] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
+  const st = useRef({ startY: 0, active: false, dist: 0 })
+  const refreshingRef = useRef(false)
+  const THRESHOLD = 70, MAX = 110
+
+  useEffect(() => {
+    if (!enabled) { setPull(0); return }
+    const scrollEl = () => document.scrollingElement || document.documentElement
+
+    const onStart = (e) => {
+      if (refreshingRef.current || e.touches.length !== 1) return
+      if ((scrollEl().scrollTop || 0) <= 0) {
+        st.current.startY = e.touches[0].clientY
+        st.current.active = true
+        st.current.dist = 0
+      }
+    }
+    const onMove = (e) => {
+      const s = st.current
+      if (!s.active || refreshingRef.current) return
+      const dy = e.touches[0].clientY - s.startY
+      if (dy <= 0 || (scrollEl().scrollTop || 0) > 0) { s.active = false; s.dist = 0; setPull(0); return }
+      s.dist = Math.min(MAX, dy * 0.5) // elastic resistance
+      setPull(s.dist)
+    }
+    const onEnd = async () => {
+      const s = st.current
+      if (!s.active) return
+      s.active = false
+      if (s.dist >= THRESHOLD) {
+        refreshingRef.current = true
+        setRefreshing(true); setPull(THRESHOLD)
+        const started = Date.now()
+        try { await onRefresh() } catch {}
+        const left = 600 - (Date.now() - started)
+        if (left > 0) await new Promise(r => setTimeout(r, left))
+        refreshingRef.current = false
+        setRefreshing(false); setPull(0)
+      } else {
+        setPull(0)
+      }
+    }
+    document.addEventListener('touchstart', onStart, { passive: true })
+    document.addEventListener('touchmove', onMove, { passive: true })
+    document.addEventListener('touchend', onEnd, { passive: true })
+    document.addEventListener('touchcancel', onEnd, { passive: true })
+    return () => {
+      document.removeEventListener('touchstart', onStart)
+      document.removeEventListener('touchmove', onMove)
+      document.removeEventListener('touchend', onEnd)
+      document.removeEventListener('touchcancel', onEnd)
+    }
+  }, [enabled, onRefresh])
+
+  return { pull, refreshing }
+}
+
+/* Full-screen gate shown on phones when the app isn't installed to the home
+   screen. Android gets the native install prompt; iOS gets Share-sheet steps. */
+function InstallGate() {
+  const [deferred, setDeferred] = useState(null)
+  const ios = isIOSDevice()
+
+  useEffect(() => {
+    const handler = (e) => { e.preventDefault(); setDeferred(e) }
+    window.addEventListener('beforeinstallprompt', handler)
+    return () => window.removeEventListener('beforeinstallprompt', handler)
+  }, [])
+
+  const install = async () => {
+    if (!deferred) return
+    deferred.prompt()
+    try { await deferred.userChoice } catch {}
+    setDeferred(null)
+  }
+
+  return (
+    <div className="install-gate">
+      <div className="install-gate-inner">
+        <div className="install-logo"><img src={LOGO} alt="" /></div>
+        <h1>Add Burn Chat to your home screen</h1>
+        <p>Burn Chat runs as a home-screen app. Add it to your home screen to continue.</p>
+
+        {ios ? (
+          <ol className="install-steps">
+            <li className="install-step"><span className="step-ic">{Icon.share}</span><span>Tap the <b>Share</b> button in your browser's toolbar</span></li>
+            <li className="install-step"><span className="step-ic">{Icon.plusSquare}</span><span>Choose <b>Add to Home Screen</b></span></li>
+            <li className="install-step"><span className="step-ic">{Icon.fire}</span><span>Open <b>Burn Chat</b> from your home screen</span></li>
+          </ol>
+        ) : deferred ? (
+          <button className="btn btn-primary" style={{ width: '100%' }} onClick={install}>Add to home screen</button>
+        ) : (
+          <ol className="install-steps">
+            <li className="install-step"><span className="step-ic">{Icon.dots}</span><span>Open the browser <b>menu</b> (⋮ top-right)</span></li>
+            <li className="install-step"><span className="step-ic">{Icon.plusSquare}</span><span>Tap <b>Install app</b> or <b>Add to Home screen</b></span></li>
+            <li className="install-step"><span className="step-ic">{Icon.fire}</span><span>Open <b>Burn Chat</b> from your home screen</span></li>
+          </ol>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /* ============================================================ */
 export default function App() {
   const [appState, setAppState] = useState('loading') // loading | onboard | locked | ready
   const [rpcVersion, setRpcVersion] = useState(0)
+  // Phones that aren't installed to the home screen get a full-screen install
+  // gate instead of the app. Computed once: installing always relaunches in a
+  // fresh standalone context where this is false.
+  const [needsInstall] = useState(() => isMobileDevice() && !isStandalonePWA())
 
   const connection = useMemo(
     () => new Connection(getRpcEndpoint(), { commitment: 'confirmed' }),
@@ -58,6 +208,8 @@ export default function App() {
     if (!walletExists() || !isPINSetup()) setAppState('onboard')
     else setAppState('locked')
   }, [])
+
+  if (needsInstall) return <Background><InstallGate /></Background>
 
   if (appState === 'loading') {
     return <Background><div className="loading-screen"><div className="loading-content">
@@ -349,6 +501,7 @@ function PinPrompt({ title, subtitle, onSubmit, onCancel }) {
   )
 }
 function Main({ connection, onRpcChange, onLock }) {
+  const isMobile = useIsMobile()
   const [view, setView] = useState('chat') // chat | settings
   const [settings, setSettings] = useState(getChatSettings())
   const [burnAddress, setBurnAddress] = useState(getBurnAddress())
@@ -420,8 +573,20 @@ function Main({ connection, onRpcChange, onLock }) {
 
   const openSettings = useCallback(() => setView('settings'), [])
 
+  // Pull-to-refresh replaces the reload button on phones.
+  const doRefresh = useCallback(() => chat.refresh(), [chat])
+  const { pull, refreshing } = usePullToRefresh({
+    enabled: isMobile && view === 'chat',
+    onRefresh: doRefresh,
+  })
+
   return (
     <div className="main-view">
+      {isMobile && (pull > 0 || refreshing) && (
+        <div className="ptr-indicator" style={{ transform: `translateY(${pull}px)`, opacity: refreshing ? 1 : Math.min(1, pull / 70) }}>
+          <div className={`ptr-spinner ${refreshing ? 'spin' : ''}`} style={refreshing ? undefined : { transform: `rotate(${pull * 3}deg)` }} />
+        </div>
+      )}
       <header className="main-header">
         <div className="brand-row">
           <img src={LOGO} className="logo-img" style={{ width: 40, height: 40 }} alt="" />
@@ -431,15 +596,9 @@ function Main({ connection, onRpcChange, onLock }) {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {!settings.watchOnly && view === 'chat' && <button className="icon-btn" onClick={() => chat.refresh()} title="Reload">{Icon.refresh}</button>}
-          {!settings.watchOnly && (
-            <button
-              className="icon-btn"
-              onClick={() => setView(view === 'settings' ? 'chat' : 'settings')}
-              title={view === 'settings' ? 'Close settings' : 'Settings'}
-            >
-              {view === 'settings' ? Icon.close : Icon.gear}
-            </button>
+          {!settings.watchOnly && view === 'chat' && !isMobile && <button className="icon-btn" onClick={() => chat.refresh()} title="Reload">{Icon.refresh}</button>}
+          {!settings.watchOnly && view === 'chat' && (
+            <button className="icon-btn" onClick={() => setView('settings')} title="Settings">{Icon.gear}</button>
           )}
           {settings.watchOnly && view === 'chat' && (
             <button className="icon-btn" onClick={() => updateSettings({ watchOnly: false })} title="Exit watch-only">
@@ -621,6 +780,16 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
 
   const canSend = !busy && amount && parseFloat(amount) > 0 && chars > 0
 
+  // Normalize the amount field ourselves. type="number" silently blanks out
+  // comma input on comma-decimal locales (e.g. PL/DE keyboards), so the burn
+  // button never lit up. We accept commas and convert them to a dot.
+  const onAmount = (raw) => {
+    let v = raw.replace(/,/g, '.').replace(/[^0-9.]/g, '')
+    const i = v.indexOf('.')
+    if (i !== -1) v = v.slice(0, i + 1) + v.slice(i + 1).replace(/\./g, '')
+    setAmount(v)
+  }
+
   const submit = async () => {
     setErr('')
     const amt = parseFloat(amount)
@@ -648,7 +817,7 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
         nick: nick || '',
         text: text,
       })
-      setText(''); setAmount('')
+      setText('') // keep the amount so the user can quickly burn it again
       showToast('🔥 Burn sent!')
     } catch (e) {
       console.error(e)
@@ -671,9 +840,9 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
       </div>
 
       <div className="amount-input-wrapper">
-        <input className="form-input" type="number" inputMode="decimal" min="0" step="any"
+        <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
           placeholder="Amount to burn (h173k)"
-          value={amount} onChange={e => setAmount(e.target.value)} />
+          value={amount} onChange={e => onAmount(e.target.value)} />
         <button className="max-btn" onClick={() => setAmount(String(wallet.h173kBalance))}>MAX</button>
       </div>
       <div className="composer-counts">
