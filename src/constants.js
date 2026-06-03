@@ -67,6 +67,17 @@ export function saveBurnAddress(addr) {
   try { localStorage.setItem(BURN_ADDRESS_KEY, addr.trim()); return true } catch { return false }
 }
 
+// ========== COMPOSER DRAFT AMOUNT ==========
+// Persist the "amount to burn" so it survives closing/reopening the app.
+const DRAFT_AMOUNT_KEY = 'h173kbc_draft_amount'
+
+export function getDraftAmount() {
+  try { return localStorage.getItem(DRAFT_AMOUNT_KEY) || '' } catch { return '' }
+}
+export function saveDraftAmount(v) {
+  try { localStorage.setItem(DRAFT_AMOUNT_KEY, v == null ? '' : String(v)); return true } catch { return false }
+}
+
 // ========== MESSAGE LIMITS ==========
 export const MAX_MEMO_BYTES = 500    // hard cap on full on-chain memo (nick + sep + text)
 export const MAX_TEXT_CHARS = 260    // visible message text limit

@@ -3,6 +3,7 @@ import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import {
   getRpcEndpoint, saveRpcEndpoint, validateRpcEndpoint, DEFAULT_RPC_ENDPOINT,
   getBurnAddress, saveBurnAddress, DEFAULT_BURN_ADDRESS,
+  getDraftAmount, saveDraftAmount,
   getChatSettings, saveChatSettings,
   getReplenishSettings, saveReplenishSettings, getReplenishEnabled, saveReplenishEnabled,
   getH173KDecimals, saveH173KDecimals,
@@ -535,7 +536,9 @@ function Main({ connection, onRpcChange, onLock }) {
   // Composer draft lives here (not in Composer) so it survives switching to
   // Settings and back — otherwise ChatView/Composer unmount and lose the input.
   const [draftText, setDraftText] = useState('')
-  const [draftAmount, setDraftAmount] = useState('')
+  const [draftAmount, setDraftAmountState] = useState(getDraftAmount)
+  // Persist the amount so it survives closing/reopening the app.
+  const setDraftAmount = useCallback((v) => { setDraftAmountState(v); saveDraftAmount(v) }, [])
 
   const pubkey = sessionWallet.publicKey
   const price = useTokenPrice()
