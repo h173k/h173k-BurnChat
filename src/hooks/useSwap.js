@@ -285,7 +285,7 @@ export function useSwap(connection, wallet) {
    */
   const executeSwap = useCallback(async (quoteResponse, direction = 'H173KtoSOL') => {
     if (!wallet?.publicKey) {
-      throw new Error('Wallet not connected')
+      throw new Error('Account not connected')
     }
     
     setLoading(true)
@@ -521,7 +521,7 @@ export function useSwap(connection, wallet) {
    */
   const autoReplenishSOL = useCallback(async (targetSOL = 0.02) => {
     if (!wallet?.publicKey) {
-      throw new Error('Wallet not connected')
+      throw new Error('Account not connected')
     }
     
     setLoading(true)
@@ -572,7 +572,7 @@ export function useSwap(connection, wallet) {
    */
   const convertSOLtoH173K = useCallback(async (solAmount) => {
     if (!wallet?.publicKey) {
-      throw new Error('Wallet not connected')
+      throw new Error('Account not connected')
     }
     
     setLoading(true)
@@ -659,7 +659,7 @@ export function useSwap(connection, wallet) {
    */
   const withAutoSOL = useCallback(async (operation, onSwap, extraSOLNeeded = 0) => {
     if (!wallet?.publicKey) {
-      throw new Error('Wallet not connected')
+      throw new Error('Account not connected')
     }
 
     const settings = getReplenishSettings()

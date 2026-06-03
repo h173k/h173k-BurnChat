@@ -16,7 +16,10 @@ import {
 import {
   generateMnemonic, validateMnemonic, importWallet, walletExists, deleteWallet, sessionWallet,
 } from './crypto/wallet'
-import { isPINSetup, setupPIN, verifyPIN } from './crypto/auth'
+import {
+  isPINSetup, setupPIN, verifyPIN,
+  checkBiometricSupport, isBiometricSetup, setupBiometric, authenticateBiometric, removeBiometric,
+} from './crypto/auth'
 import { useBurnChat } from './hooks/useBurnChat'
 import { useChatWallet } from './hooks/useChatWallet'
 import { useTokenPrice, formatLastUpdated } from './usePrice'
@@ -38,6 +41,7 @@ const Icon = {
   fire: <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c1 3 4 4.5 4 8a4 4 0 0 1-8 0c0-1 .3-1.8.7-2.5C7 8.5 6 10.5 6 13a6 6 0 0 0 12 0c0-4.5-3.5-7-6-11z"/></svg>,
   close: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
   eye: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+  fingerprint: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 11c0 4-1 7-2 9"/><path d="M5.8 8.5A7 7 0 0 1 19 11c0 1 0 2-.2 3"/><path d="M8 11a4 4 0 0 1 8 0c0 4-.5 6-1 8"/><path d="M3.5 11a8.5 8.5 0 0 1 2-5.5"/><path d="M17.5 18.5c.3-1 .5-2.5.5-4.5"/><path d="M12 11v1c0 5-1 8-2.5 10.5"/></svg>,
 }
 
 /* ============================================================ */
@@ -117,9 +121,9 @@ function Onboarding({ onDone }) {
           <div className="onboarding-step">
             <div className="onboarding-logo"><img src={LOGO} className="logo-img large" alt="" /></div>
             <h1 className="onboarding-title">h173k Burn Chat</h1>
-            <p className="onboarding-subtitle">Burn $h173k and leave a message on-chain. Your wallet stays on this device — this is not a connect-style dApp.</p>
+            <p className="onboarding-subtitle">Burn $h173k and leave a message on-chain. Your account stays on this device — this is not a connect-style dApp.</p>
             <div className="onboarding-actions">
-              <button className="btn btn-action btn-primary" onClick={startCreate}>Create new wallet</button>
+              <button className="btn btn-action btn-primary" onClick={startCreate}>Create new account</button>
               <button className="btn btn-secondary" onClick={startImport}>I have a recovery phrase</button>
             </div>
           </div>
@@ -161,7 +165,7 @@ function Onboarding({ onDone }) {
     return (
       <div className="onboarding"><div className="onboarding-container">
         <button className="back-btn" onClick={() => setStep('intro')}>{Icon.back} Back</button>
-        <h1 className="onboarding-title" style={{ marginTop: 16 }}>Import wallet</h1>
+        <h1 className="onboarding-title" style={{ marginTop: 16 }}>Import account</h1>
         <p className="onboarding-subtitle">Enter your 12 or 24-word recovery phrase, separated by spaces.</p>
         <div className="form-group">
           <textarea className="form-input mnemonic-input" placeholder="word1 word2 word3 …" value={importText}
@@ -246,6 +250,33 @@ function PinPad({ onPress, onDelete, disabled }) {
 function LockScreen({ onUnlock }) {
   const [pin, setPin] = useState('')
   const [err, setErr] = useState('')
+  const [bioReady, setBioReady] = useState(false)
+  const [bioBusy, setBioBusy] = useState(false)
+  const triedAuto = useRef(false)
+
+  const runBiometric = useCallback(async () => {
+    setErr(''); setBioBusy(true)
+    try {
+      const recoveredPin = await authenticateBiometric()
+      sessionWallet.unlock(recoveredPin)
+      onUnlock()
+    } catch (e) {
+      setErr('Biometric unlock failed — enter your PIN')
+    } finally {
+      setBioBusy(false)
+    }
+  }, [onUnlock])
+
+  // Detect biometric availability once, and auto-prompt it on first mount so the
+  // user normally never has to touch the PIN pad.
+  useEffect(() => {
+    if (!isBiometricSetup()) return
+    setBioReady(true)
+    if (!triedAuto.current) {
+      triedAuto.current = true
+      runBiometric()
+    }
+  }, [runBiometric])
 
   const press = (d) => {
     if (pin.length >= 6) return
@@ -269,18 +300,64 @@ function LockScreen({ onUnlock }) {
       <h2 className="lock-title">Enter your PIN</h2>
       <div className="pin-display">{[0,1,2,3,4,5].map(i => <div key={i} className={`pin-dot ${i < pin.length ? 'filled' : ''}`} />)}</div>
       {err && <div className="error-message">{err}</div>}
-      <PinPad onPress={press} onDelete={del} />
+      <PinPad onPress={press} onDelete={del} disabled={bioBusy} />
+      {bioReady && (
+        <button className="btn btn-secondary biometric-btn" onClick={runBiometric} disabled={bioBusy}>
+          {Icon.fingerprint}{bioBusy ? 'Authenticating…' : 'Unlock with biometrics'}
+        </button>
+      )}
     </div></div>
   )
 }
 
-/* ---------------- Main ---------------- */
+/* PIN confirmation modal — used when enabling biometrics from Settings, where
+   the wallet is already unlocked but we still need the raw PIN to bind it to a
+   passkey. */
+function PinPrompt({ title, subtitle, onSubmit, onCancel }) {
+  const [pin, setPin] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const press = async (d) => {
+    if (busy || pin.length >= 6) return
+    const next = pin + d
+    setPin(next)
+    if (next.length === 6) {
+      setBusy(true)
+      try {
+        await onSubmit(next)
+      } catch (e) {
+        setErr(e.message || 'Something went wrong'); setPin('')
+      } finally {
+        setBusy(false)
+      }
+    }
+  }
+  const del = () => { if (!busy) setPin(p => p.slice(0, -1)) }
+
+  return (
+    <div className="sol-prompt-overlay" onClick={busy ? undefined : onCancel}>
+      <div className="sol-prompt-card" onClick={e => e.stopPropagation()}>
+        <h2 className="lock-title" style={{ marginBottom: 12 }}>{title}</h2>
+        {subtitle && <p className="onboarding-subtitle" style={{ marginBottom: 20 }}>{subtitle}</p>}
+        <div className="pin-display">{[0,1,2,3,4,5].map(i => <div key={i} className={`pin-dot ${i < pin.length ? 'filled' : ''}`} />)}</div>
+        {err && <div className="error-message">{err}</div>}
+        <PinPad onPress={press} onDelete={del} disabled={busy} />
+        <button className="btn btn-secondary" style={{ marginTop: 12, width: '100%' }} onClick={onCancel} disabled={busy}>Cancel</button>
+      </div>
+    </div>
+  )
+}
 function Main({ connection, onRpcChange, onLock }) {
   const [view, setView] = useState('chat') // chat | settings
   const [settings, setSettings] = useState(getChatSettings())
   const [burnAddress, setBurnAddress] = useState(getBurnAddress())
   const [fxMessage, setFxMessage] = useState(null)
   const [toast, setToast] = useState(null)
+  // Composer draft lives here (not in Composer) so it survives switching to
+  // Settings and back — otherwise ChatView/Composer unmount and lose the input.
+  const [draftText, setDraftText] = useState('')
+  const [draftAmount, setDraftAmount] = useState('')
 
   const pubkey = sessionWallet.publicKey
   const price = useTokenPrice()
@@ -335,7 +412,7 @@ function Main({ connection, onRpcChange, onLock }) {
   // RPC warning: the default public endpoint is heavily rate-limited, and any
   // RPC error usually means the user must set their own endpoint. Surface a
   // dismissible banner with a one-tap shortcut to the RPC settings (root cause
-  // of "app feels stuck right after creating a wallet").
+  // of "app feels stuck right after creating an account").
   const [rpcBannerDismissed, setRpcBannerDismissed] = useState(false)
   const usingDefaultRpc = getRpcEndpoint() === DEFAULT_RPC_ENDPOINT
   const showRpcBanner = view === 'chat' && !settings.watchOnly && !rpcBannerDismissed
@@ -389,6 +466,8 @@ function Main({ connection, onRpcChange, onLock }) {
           needsDeposit={needsDeposit} onCloseDeposit={() => setDepositDismissed(true)}
           showRpcBanner={showRpcBanner} onDismissRpcBanner={() => setRpcBannerDismissed(true)}
           onOpenSettings={openSettings}
+          draftText={draftText} setDraftText={setDraftText}
+          draftAmount={draftAmount} setDraftAmount={setDraftAmount}
         />
       )}
 
@@ -411,7 +490,7 @@ function PriceTag({ price, tickerSize }) {
 }
 
 /* ---------------- Chat ---------------- */
-function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings }) {
+function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount }) {
   const displayAmount = useCallback((amt) => {
     if (settings.displayUnit === UNIT_USDT && price.price != null) return formatUSD(amt * price.price)
     return `${formatH173K(amt)} ${TOKEN_TICKER}`
@@ -482,7 +561,8 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
 
       {!settings.watchOnly && (
         <Composer wallet={wallet} settings={settings} burnAddress={burnAddress} price={price}
-          pubkey={pubkey} onSent={onSent} showToast={showToast} />
+          pubkey={pubkey} onSent={onSent} showToast={showToast}
+          text={draftText} setText={setDraftText} amount={draftAmount} setAmount={setDraftAmount} />
       )}
     </>
   )
@@ -509,9 +589,7 @@ function MessageRow({ m, displayAmount, mine, big }) {
 }
 
 /* ---------------- Composer ---------------- */
-function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showToast }) {
-  const [text, setText] = useState('')
-  const [amount, setAmount] = useState('')
+function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showToast, text, setText, amount, setAmount }) {
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState('')
   const [err, setErr] = useState('')
@@ -553,7 +631,7 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
 
     // need either h173k or SOL to fund the burn
     if (wallet.h173kBalance <= 0 && wallet.solBalance <= 0.01) {
-      setErr('Fund the wallet with h173k or SOL first'); return
+      setErr('Fund the account with h173k or SOL first'); return
     }
 
     setBusy(true)
@@ -627,8 +705,8 @@ function DepositPrompt({ pubkey, onClose }) {
     <div className="deposit-card">
       <button className="prompt-close" onClick={onClose} title="Dismiss" aria-label="Dismiss">{Icon.close}</button>
       <div className="sol-prompt-icon">👛</div>
-      <h2>Fund your wallet</h2>
-      <p>This wallet is empty. Deposit <b>h173k</b> or <b>SOL</b> to start burning. SOL is converted to h173k automatically when you burn.</p>
+      <h2>Fund your account</h2>
+      <p>This account is empty. Deposit <b>h173k</b> or <b>SOL</b> to start burning. SOL is converted to h173k automatically when you burn.</p>
       <div className="sol-prompt-address">
         <div className="sol-prompt-label">Your address</div>
         <div className="qr-code-container" style={{ display: 'flex', justifyContent: 'center' }}>
@@ -703,6 +781,36 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
   const [repEnabled, setRepEnabled] = useState(getReplenishEnabled())
   const [decimals, setDecimals] = useState(h173kDecimals)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Biometric unlock
+  const [bioSupported, setBioSupported] = useState(false)
+  const [bioOn, setBioOn] = useState(isBiometricSetup())
+  const [showBioPin, setShowBioPin] = useState(false)
+  const [bioMsg, setBioMsg] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    checkBiometricSupport().then(ok => { if (alive) setBioSupported(ok) }).catch(() => {})
+    return () => { alive = false }
+  }, [])
+
+  const enableBiometric = async (pin) => {
+    verifyPIN(pin)               // throws on wrong PIN → surfaced by PinPrompt
+    await setupBiometric(pin)    // triggers the OS passkey/biometric prompt
+    setBioOn(true)
+    setShowBioPin(false)
+    setBioMsg('Biometric unlock enabled ✓')
+    setTimeout(() => setBioMsg(''), 3000)
+  }
+
+  const toggleBiometric = (next) => {
+    setBioMsg('')
+    if (next) {
+      setShowBioPin(true)        // need the PIN to bind the passkey
+    } else {
+      removeBiometric()
+      setBioOn(false)
+    }
+  }
 
   const saveNick = () => updateSettings({ nickname: nick.trim().slice(0, 32) })
 
@@ -886,12 +994,18 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         <span className="form-hint">When on, the app swaps a little h173k → SOL on the h173k-SOL pool so you always have fees.</span>
       </div>
 
-      {/* Wallet */}
+      {/* Account */}
       <div className="settings-section">
-        <h3>Wallet</h3>
+        <h3>Account</h3>
         <div className="settings-item" onClick={() => { navigator.clipboard?.writeText(pubkey?.toString() || '') }}>
           <span>Address</span><span className="address-small">{truncateAddress(pubkey?.toString(), 6, 6)}</span>
         </div>
+        {bioSupported ? (
+          <ToggleRow label="Unlock with biometrics (skip PIN entry)" checked={bioOn} onChange={toggleBiometric} />
+        ) : (
+          <div className="settings-item"><span className="dim">Biometrics not available on this device</span></div>
+        )}
+        {bioMsg && <div className="form-hint" style={{ padding: '0 4px' }}>{bioMsg}</div>}
         <div className="settings-item" onClick={onLock}><span>Lock now</span><span className="arrow">›</span></div>
       </div>
 
@@ -899,7 +1013,7 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
       <div className="settings-section danger">
         <h3>Danger zone</h3>
         {!confirmDelete ? (
-          <button className="btn btn-danger" style={{ width: '100%' }} onClick={() => setConfirmDelete(true)}>Remove wallet from this device</button>
+          <button className="btn btn-danger" style={{ width: '100%' }} onClick={() => setConfirmDelete(true)}>Remove account from this device</button>
         ) : (
           <div className="delete-confirm">
             <p className="warning-text">This erases the encrypted seed from this device. Make sure you have your recovery phrase saved — it's the only way to restore.</p>
@@ -912,6 +1026,15 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
       </div>
 
       <div style={{ height: 40 }} />
+
+      {showBioPin && (
+        <PinPrompt
+          title="Confirm your PIN"
+          subtitle="Enter your current PIN to link biometric unlock to this account."
+          onSubmit={enableBiometric}
+          onCancel={() => setShowBioPin(false)}
+        />
+      )}
     </div>
   )
 }

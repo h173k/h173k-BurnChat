@@ -303,7 +303,7 @@ export function useEscrowProgram(connection, wallet) {
    */
   const getOrCreateBuyerIndex = useCallback(async () => {
     const program = getProgram()
-    if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+    if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
     const [buyerIndexPDA] = getBuyerIndexPDA(wallet.publicKey)
     
@@ -345,7 +345,7 @@ export function useEscrowProgram(connection, wallet) {
    */
   const initializeBuyerIndex = useCallback(async () => {
     const program = getProgram()
-    if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+    if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
     const [buyerIndexPDA] = getBuyerIndexPDA(wallet.publicKey)
 
@@ -366,7 +366,7 @@ export function useEscrowProgram(connection, wallet) {
    */
   const initializeSellerIndex = useCallback(async () => {
     const program = getProgram()
-    if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+    if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
     const [sellerIndexPDA] = getSellerIndexPDA(wallet.publicKey)
 
@@ -557,7 +557,7 @@ export function useEscrowProgram(connection, wallet) {
    */
   const findOfferByCode = useCallback(async (code) => {
     const program = getProgram()
-    if (!program) throw new Error('Wallet not connected')
+    if (!program) throw new Error('Account not connected')
 
     try {
       // Get all offers - but only check PendingSeller status
@@ -591,7 +591,7 @@ export function useEscrowProgram(connection, wallet) {
    */
   const readOfferByCode = useCallback(async (code, forceBlockchainCheck = false) => {
     const program = getProgram()
-    if (!program) throw new Error('Wallet not connected')
+    if (!program) throw new Error('Account not connected')
 
     const walletKey = wallet.publicKey.toString()
     const cachedOffers = loadCachedOffers(walletKey)
@@ -660,7 +660,7 @@ export function useEscrowProgram(connection, wallet) {
 
     try {
       const program = getProgram()
-      if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+      if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
       console.log('🔐 Creating offer...')
 
@@ -757,7 +757,7 @@ export function useEscrowProgram(connection, wallet) {
 
     try {
       const program = getProgram()
-      if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+      if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
       console.log('🔵 Accepting offer:', offerPubkey.toString())
 
@@ -827,7 +827,7 @@ export function useEscrowProgram(connection, wallet) {
 
     try {
       const program = getProgram()
-      if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+      if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
       const offer = await program.account.offer.fetch(offerPubkey)
       const [buyerIndexPDA] = getBuyerIndexPDA(offer.buyer)
@@ -882,7 +882,7 @@ export function useEscrowProgram(connection, wallet) {
 
     try {
       const program = getProgram()
-      if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+      if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
       const offer = await program.account.offer.fetch(offerPubkey)
       const [buyerIndexPDA] = getBuyerIndexPDA(offer.buyer)
@@ -957,7 +957,7 @@ export function useEscrowProgram(connection, wallet) {
 
     try {
       const program = getProgram()
-      if (!program || !wallet?.publicKey) throw new Error('Wallet not connected')
+      if (!program || !wallet?.publicKey) throw new Error('Account not connected')
 
       const offer = await program.account.offer.fetch(offerPubkey)
       const [buyerIndexPDA] = getBuyerIndexPDA(offer.buyer)
@@ -1015,7 +1015,7 @@ export function useEscrowProgram(connection, wallet) {
    */
   const fetchOfferStatus = useCallback(async (offerPubkey) => {
     const program = getProgram()
-    if (!program) throw new Error('Wallet not connected')
+    if (!program) throw new Error('Account not connected')
 
     try {
       const offer = await program.account.offer.fetch(offerPubkey)

@@ -238,13 +238,13 @@ export async function setupBiometric(userPassword) {
       publicKey: {
         challenge,
         rp: {
-          name: 'H173K Wallet',
+          name: 'H173K Account',
           id: window.location.hostname
         },
         user: {
           id: new Uint8Array(16),
           name: 'h173k-user',
-          displayName: 'H173K Wallet User'
+          displayName: 'H173K Account User'
         },
         pubKeyCredParams: [
           { alg: -7, type: 'public-key' },   // ES256
