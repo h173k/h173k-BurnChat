@@ -75,21 +75,13 @@ export function useChatWallet(connection, sessionWallet) {
 
     const tx = new Transaction()
 
-    // Compute budget. Memo cost scales with message length (~310 CU/byte), so a
-    // 500-byte message needs ~155k CU; with the token transfer and a possible ATA
-    // creation we reserve a safe headroom. The old 80k limit (and only when a
-    // priority fee was set) made long messages fail simulation with
-    // "exceeded CUs meter". We now always set a generous limit.
-    const units = 300_000
-    tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units }))
-
-    // optional priority fee — the per-CU price is derived from the desired total,
-    // so the fee stays ≈ swapFeeSol regardless of the unit limit (you only pay for
-    // CUs actually consumed).
+    // optional priority fee
     const { swapFeeSol } = getReplenishSettings()
     if (swapFeeSol > 0) {
+      const units = 80_000
       const priorityLamports = Math.round(swapFeeSol * LAMPORTS_PER_SOL)
       const micro = Math.ceil((priorityLamports * 1_000_000) / units)
+      tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units }))
       tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: micro }))
     }
 
