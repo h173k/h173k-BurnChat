@@ -306,6 +306,7 @@ export function useSwap(connection, wallet) {
       let needsWSOLCreate = false
       let needsWSOLWrap = false
       let needsWSOLClose = false
+      let needsH173KCreate = false
       
       if (direction === 'H173KtoSOL') {
         userInputAccount = userH173KAccount
@@ -353,7 +354,16 @@ export function useSwap(connection, wallet) {
         
         inputLamports = Math.floor(quoteResponse.inputAmount * LAMPORTS_PER_SOL)
         minOutputLamports = Number(quoteResponse.minimumOutputLamports)
-        
+
+        // The CPMM needs the output (h173k) token account to already exist. A
+        // brand-new wallet that never held h173k has no ATA yet, which triggered
+        // "AccountNotInitialized" (0xbc4). Create it in this same transaction.
+        try {
+          await getAccount(connection, userH173KAccount)
+        } catch {
+          needsH173KCreate = true
+        }
+
         // Check if WSOL account exists
         try {
           await getAccount(connection, userWSOLAccount)
@@ -398,6 +408,18 @@ export function useSwap(connection, wallet) {
         )
       }
       
+      // Create the h173k output account if missing (SOL -> H173K into a fresh wallet)
+      if (needsH173KCreate) {
+        transaction.add(
+          createAssociatedTokenAccountInstruction(
+            wallet.publicKey,
+            userH173KAccount,
+            wallet.publicKey,
+            TOKEN_MINT
+          )
+        )
+      }
+
       // Add swap instruction
       transaction.add(
         createCPMMSwapInstruction(

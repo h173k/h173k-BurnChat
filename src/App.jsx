@@ -15,7 +15,7 @@ import {
   MIN_TRIGGER_THRESHOLD, MIN_REPLENISH_TO, MIN_SWAP_PRIORITY_FEE,
 } from './constants'
 import {
-  generateMnemonic, validateMnemonic, importWallet, walletExists, deleteWallet, sessionWallet, changePassword,
+  generateMnemonic, validateMnemonic, importWallet, walletExists, deleteWallet, sessionWallet, changePassword, exportMnemonic,
 } from './crypto/wallet'
 import {
   isPINSetup, setupPIN, verifyPIN,
@@ -944,6 +944,30 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
 }
 
 /* ---------------- Deposit prompt (inline, dismissible) ---------------- */
+/* Reveal the recovery phrase. Only reached after a PIN check. Renders the words
+   in the same grid as onboarding, with a copy button and a warning. */
+function RecoveryPhraseModal({ phrase, onClose }) {
+  const words = phrase.trim().split(/\s+/)
+  const [copied, setCopied] = useState(false)
+  const copy = () => { navigator.clipboard?.writeText(phrase); setCopied(true); setTimeout(() => setCopied(false), 1500) }
+  return (
+    <div className="sol-prompt-overlay" onClick={onClose}>
+      <div className="sol-prompt-card" onClick={e => e.stopPropagation()} style={{ maxHeight: '90vh', overflowY: 'auto' }}>
+        <button className="prompt-close" onClick={onClose} title="Close" aria-label="Close">{Icon.close}</button>
+        <h2 style={{ marginBottom: 8 }}>Recovery phrase</h2>
+        <div className="backup-warning"><span className="warning-icon">⚠️</span><p>Anyone with this phrase can take your funds. Never share it.</p></div>
+        <div className="mnemonic-display"><div className="mnemonic-words">
+          {words.map((w, i) => (
+            <div className="mnemonic-word" key={i}><span className="word-number">{i + 1}</span><span className="word-text">{w}</span></div>
+          ))}
+        </div></div>
+        <button className="btn btn-secondary" onClick={copy} style={{ width: '100%', marginTop: 16 }}>{copied ? 'Copied ✓' : 'Copy phrase'}</button>
+        <button className="btn btn-primary" onClick={onClose} style={{ width: '100%', marginTop: 10 }}>Done</button>
+      </div>
+    </div>
+  )
+}
+
 /* Address QR + copy, opened from the header button. */
 function ReceiveModal({ pubkey, onClose }) {
   const addr = pubkey ? pubkey.toString() : ''
@@ -1089,6 +1113,9 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
   // Change PIN
   const [showChangePin, setShowChangePin] = useState(false)
   const [pinMsg, setPinMsg] = useState('')
+  // Reveal recovery phrase (PIN-gated)
+  const [showRevealPin, setShowRevealPin] = useState(false)
+  const [revealedPhrase, setRevealedPhrase] = useState(null)
 
   useEffect(() => {
     let alive = true
@@ -1339,6 +1366,7 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         {bioMsg && <div className="form-hint" style={{ padding: '0 4px' }}>{bioMsg}</div>}
         <div className="settings-item" onClick={() => setShowChangePin(true)}><span>Change PIN</span><span className="arrow">›</span></div>
         {pinMsg && <div className="form-hint" style={{ padding: '0 4px' }}>{pinMsg}</div>}
+        <div className="settings-item" onClick={() => setShowRevealPin(true)}><span>Show recovery phrase</span><span className="arrow">›</span></div>
         <div className="settings-item" onClick={onLock}><span>Lock now</span><span className="arrow">›</span></div>
       </div>
 
@@ -1380,6 +1408,21 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
           }}
         />
       )}
+
+      {showRevealPin && (
+        <PinPrompt
+          title="Confirm your PIN"
+          subtitle="Enter your PIN to reveal your recovery phrase."
+          onSubmit={(pin) => {
+            const m = exportMnemonic(pin) // throws on wrong PIN → shown by PinPrompt
+            setRevealedPhrase(m)
+            setShowRevealPin(false)
+          }}
+          onCancel={() => setShowRevealPin(false)}
+        />
+      )}
+
+      {revealedPhrase && <RecoveryPhraseModal phrase={revealedPhrase} onClose={() => setRevealedPhrase(null)} />}
     </div>
   )
 }
