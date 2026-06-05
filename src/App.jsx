@@ -5,6 +5,8 @@ import {
   getBurnAddress, saveBurnAddress, DEFAULT_BURN_ADDRESS,
   getDraftAmount, saveDraftAmount,
   getChatSettings, saveChatSettings,
+  getGoalProgress, saveGoalProgress, resetGoalProgress,
+  getFxState, saveFxState, capList,
   getReplenishSettings, saveReplenishSettings, getReplenishEnabled, saveReplenishEnabled,
   getH173KDecimals, saveH173KDecimals,
   TOKEN_TICKER, TOKEN_SYMBOL, MAX_TEXT_CHARS, MAX_MEMO_BYTES, MEMO_SEP,
@@ -586,6 +588,14 @@ function Main({ connection, onRpcChange, onLock }) {
   const [settings, setSettings] = useState(getChatSettings())
   const [burnAddress, setBurnAddress] = useState(getBurnAddress())
   const [fxMessage, setFxMessage] = useState(null)
+  const [goalFxOpen, setGoalFxOpen] = useState(false)
+  // Burn-goal progress. Initialised from localStorage so it accumulates across
+  // restarts. The refs mirror the persisted state for use inside effects.
+  const [goalProgress, setGoalProgress] = useState(getGoalProgress)
+  const goalProgressRef = useRef(goalProgress)
+  const countedRef = useRef(new Set(goalProgress.counted || []))
+  // Big burns that already played their celebration (persisted across runs).
+  const celebratedRef = useRef(new Set(getFxState().sigs || []))
   const [toast, setToast] = useState(null)
   // Composer draft lives here (not in Composer) so it survives switching to
   // Settings and back — otherwise ChatView/Composer unmount and lose the input.
@@ -597,14 +607,11 @@ function Main({ connection, onRpcChange, onLock }) {
   const pubkey = sessionWallet.publicKey
   const price = useTokenPrice()
 
-  const onNewLive = useCallback((fresh) => {
-    if (!settings.fxEnabled) return
-    // pick the biggest above threshold
-    const big = fresh.filter(m => m.amount >= settings.fxThreshold).sort((a, b) => b.amount - a.amount)[0]
-    if (big) setFxMessage(big)
-  }, [settings.fxEnabled, settings.fxThreshold])
-
-  const chat = useBurnChat(connection, burnAddress, settings.fetchLimit, onNewLive)
+  // Big-burn celebrations and goal accumulation are both driven by effects that
+  // watch the full message set below (so they work identically for live polls
+  // and for messages reloaded after a restart). The hook no longer needs a
+  // live callback for the effect.
+  const chat = useBurnChat(connection, burnAddress, settings.fetchLimit)
   const wallet = useChatWallet(connection, sessionWallet)
 
   // local optimistic messages (own sends) merged with chain messages, deduped by signature
@@ -628,13 +635,120 @@ function Main({ connection, onRpcChange, onLock }) {
     setSettings(prev => { const next = { ...prev, ...patch }; saveChatSettings(next); return next })
   }, [])
 
+  // --- Big-burn celebration (persists across runs) ---
+  // Drives the full-screen effect from the complete message set, so it fires the
+  // same whether a big burn just arrived live or was reloaded after a restart.
+  // The set of already-celebrated signatures is persisted, so:
+  //   * the historical backlog never spams celebrations on first launch,
+  //   * each big burn celebrates at most once, ever,
+  //   * a big burn that happened while the app was closed still gets its effect
+  //     once when you reopen — its special graphics survive the restart.
+  useEffect(() => {
+    if (chat.loading) return
+    const fx = getFxState()
+    if (!fx.baseline) {
+      // First ever run: seed everything currently on screen as "already seen"
+      // so we don't replay the whole history as popups.
+      const seed = capList([...fx.sigs, ...allMessages.map(m => m.signature)])
+      celebratedRef.current = new Set(seed)
+      saveFxState({ baseline: true, sigs: seed })
+      return
+    }
+    if (!settings.fxEnabled || !(settings.fxThreshold > 0)) return
+    const fresh = allMessages.filter(
+      m => m.amount >= settings.fxThreshold && !celebratedRef.current.has(m.signature)
+    )
+    if (!fresh.length) return
+    for (const m of fresh) celebratedRef.current.add(m.signature)
+    const capped = capList([...celebratedRef.current])
+    celebratedRef.current = new Set(capped)
+    saveFxState({ baseline: true, sigs: capped })
+    // Celebrate the biggest newly-seen big burn (avoids a queue of popups).
+    const big = fresh.slice().sort((a, b) => b.amount - a.amount)[0]
+    setFxMessage(big)
+  }, [allMessages, chat.loading, settings.fxEnabled, settings.fxThreshold])
+
+  // --- Burn goal accumulation (persists across runs) ---
+  // Counting starts the moment the goal is enabled: the burns already in the
+  // chat at that point are marked as "before the goal" (counted, but not added),
+  // so only burns from then on move the bar. New burns are deduped by signature
+  // so re-fetched messages are never counted twice, and the running total is
+  // kept in localStorage so it survives restarts.
+  useEffect(() => {
+    if (chat.loading) return
+    if (!settings.goalEnabled) return // only count while the goal is active
+    const prev = goalProgressRef.current
+    let burned = prev.burned
+    let reached = prev.reached
+    let lastTarget = prev.lastTarget
+    let started = prev.started
+    let changed = false
+    if (!started) {
+      // Baseline: ignore everything already on screen, start fresh from now.
+      countedRef.current = new Set(allMessages.map(m => m.signature))
+      burned = 0
+      reached = false
+      lastTarget = settings.goalTarget
+      started = true
+      changed = true
+    } else {
+      for (const m of allMessages) {
+        if (!countedRef.current.has(m.signature)) {
+          countedRef.current.add(m.signature)
+          burned += (m.amount > 0 ? m.amount : 0)
+          changed = true
+        }
+      }
+      // Changing the target arms the celebration again for the new goal.
+      if (settings.goalTarget !== lastTarget) {
+        lastTarget = settings.goalTarget
+        reached = false
+        changed = true
+      }
+    }
+    let popup = false
+    if (settings.goalTarget > 0 && burned >= settings.goalTarget && !reached) {
+      reached = true
+      popup = true
+      changed = true
+    }
+    if (changed) {
+      const capped = capList([...countedRef.current])
+      countedRef.current = new Set(capped)
+      const next = { burned, reached, lastTarget, started, counted: capped }
+      goalProgressRef.current = next
+      setGoalProgress(next)
+      saveGoalProgress(next)
+    }
+    if (popup) setGoalFxOpen(true)
+  }, [allMessages, chat.loading, settings.goalEnabled, settings.goalTarget])
+
+  const resetGoal = useCallback(() => {
+    resetGoalProgress()
+    // started:false → the next effect run re-baselines to "now", so the count
+    // restarts fresh and ignores the current backlog.
+    const fresh = { burned: 0, reached: false, lastTarget: settings.goalTarget, started: false, counted: [] }
+    countedRef.current = new Set()
+    goalProgressRef.current = fresh
+    setGoalProgress(fresh)
+    setGoalFxOpen(false)
+  }, [settings.goalTarget])
+
   const showToast = useCallback((msg, kind = 'ok') => {
     setToast({ msg, kind }); setTimeout(() => setToast(null), 4000)
   }, [])
 
   const onSent = useCallback((msg) => {
     setLocalMsgs(prev => [msg, ...prev])
-    if (settings.fxEnabled && msg.amount >= settings.fxThreshold) setFxMessage(msg)
+    // Instant feedback for your own big burn, and mark it celebrated so the
+    // effect above doesn't fire a second time when it re-appears from chain.
+    if (settings.fxEnabled && settings.fxThreshold > 0 && msg.amount >= settings.fxThreshold) {
+      celebratedRef.current.add(msg.signature)
+      const capped = capList([...celebratedRef.current])
+      celebratedRef.current = new Set(capped)
+      saveFxState({ baseline: true, sigs: capped })
+      setFxMessage(msg)
+    }
   }, [settings.fxEnabled, settings.fxThreshold])
 
   // deposit prompt (req 19): no SOL AND no h173k.
@@ -700,6 +814,7 @@ function Main({ connection, onRpcChange, onLock }) {
           onRpcChange={onRpcChange} onLock={onLock}
           onBack={() => setView('chat')}
           pubkey={pubkey} h173kDecimals={getH173KDecimals()}
+          goalBurned={goalProgress.burned} onResetGoal={resetGoal}
         />
       ) : (
         <ChatView
@@ -707,6 +822,7 @@ function Main({ connection, onRpcChange, onLock }) {
           settings={settings} price={price} status={chat.status} loading={chat.loading} error={chat.error}
           wallet={wallet} burnAddress={burnAddress} pubkey={pubkey}
           onSent={onSent} showToast={showToast}
+          goalBurned={goalProgress.burned}
           needsDeposit={needsDeposit} onCloseDeposit={() => setDepositDismissed(true)}
           showRpcBanner={showRpcBanner} onDismissRpcBanner={() => setRpcBannerDismissed(true)}
           onOpenSettings={openSettings}
@@ -716,6 +832,7 @@ function Main({ connection, onRpcChange, onLock }) {
       )}
 
       {fxMessage && <BurnFx message={fxMessage} settings={settings} price={price} onClose={() => setFxMessage(null)} />}
+      {goalFxOpen && <GoalFx settings={settings} burned={goalProgress.burned} price={price} onClose={() => setGoalFxOpen(false)} />}
       {showReceive && <ReceiveModal pubkey={pubkey} onClose={() => setShowReceive(false)} />}
       {toast && <div className={`toast ${toast.kind}`}>{toast.msg}</div>}
     </div>
@@ -735,7 +852,7 @@ function PriceTag({ price, tickerSize }) {
 }
 
 /* ---------------- Chat ---------------- */
-function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount }) {
+function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalBurned, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount }) {
   const displayAmount = useCallback((amt) => {
     if (settings.displayUnit === UNIT_USDT && price.price != null) return formatUSD(amt * price.price)
     return `${formatH173K(amt)} ${TOKEN_TICKER}`
@@ -769,6 +886,8 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
         <span>{status === 'live' ? <><span className="live-dot" /> live</> : status === 'error' ? 'connection error' : 'connecting…'}</span>
         <span>{messages.length}{settings.minBurnFilter > 0 ? ` / ${totalCount}` : ''} messages</span>
       </div>
+
+      <GoalBar settings={settings} burned={goalBurned} displayAmount={displayAmount} />
 
       {showRpcBanner && (
         <div className="rpc-banner">
@@ -820,6 +939,7 @@ function MessageRow({ m, displayAmount, mine, big }) {
     <div className={`msg ${mine ? 'mine' : ''} ${big ? 'msg-big' : ''}`}>
       <div className="msg-head">
         <span className="msg-nick">{m.nick ? m.nick : 'anon'}</span>
+        {big && <span className="msg-big-badge">{Icon.fire} BIG BURN</span>}
         <span className="msg-from">{truncateAddress(m.sender)}</span>
         <span className="msg-time">{timeAgo(m.blockTime)}</span>
       </div>
@@ -1024,6 +1144,56 @@ function DepositPrompt({ pubkey, onClose }) {
 }
 
 /* ---------------- Special effect overlay (req 13) ---------------- */
+function GoalBar({ settings, burned, displayAmount }) {
+  if (!settings.goalEnabled || !(settings.goalTarget > 0)) return null
+  const total = burned > 0 ? burned : 0
+  const pct = Math.min(100, (total / settings.goalTarget) * 100)
+  const reached = total >= settings.goalTarget
+  return (
+    <div className={`goal-bar ${reached ? 'reached' : ''}`}>
+      <div className="goal-bar-head">
+        <span className="goal-bar-title">{Icon.fire} Burn goal</span>
+        <span className="goal-bar-pct">{reached ? '100' : pct.toFixed(pct < 10 ? 2 : 1)}%</span>
+      </div>
+      <div className="goal-bar-track">
+        <div className="goal-bar-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="goal-bar-foot">
+        <span className="goal-bar-burned">{displayAmount(total)}</span>
+        <span className="goal-bar-target dim">/ {displayAmount(settings.goalTarget)}</span>
+      </div>
+    </div>
+  )
+}
+
+function GoalFx({ settings, burned, price, onClose }) {
+  useEffect(() => {
+    const secs = Number(settings.fxDuration) > 0 ? Number(settings.fxDuration) : 8
+    const t = setTimeout(onClose, Math.max(secs, 4) * 1000)
+    return () => clearTimeout(t)
+  }, [onClose, settings.fxDuration])
+  const amountStr = settings.displayUnit === UNIT_USDT && price.price != null
+    ? formatUSD(burned * price.price)
+    : `${formatH173K(burned)} h173k`
+  let dim = Number(settings.fxDim)
+  if (!Number.isFinite(dim)) dim = 85
+  dim = Math.min(100, Math.max(0, dim)) / 100
+  const overlayStyle = {
+    background: `radial-gradient(circle at 50% 40%, rgba(255,170,40,${0.26 * dim}), transparent 70%), rgba(0,0,0,${dim})`,
+  }
+  return (
+    <div className="fx-overlay goal-fx" onClick={onClose} style={overlayStyle}>
+      <div className="fx-card">
+        <div className="fx-flames">🎉🔥🎉</div>
+        <div className="fx-label">GOAL REACHED</div>
+        <div className="fx-amount">{amountStr}</div>
+        <div className="fx-text" style={{ fontSize: 20, marginTop: 8 }}>{settings.goalText}</div>
+        <div className="fx-hint">tap to dismiss</div>
+      </div>
+    </div>
+  )
+}
+
 function BurnFx({ message, settings, price, onClose }) {
   useEffect(() => {
     const secs = Number(settings.fxDuration) > 0 ? Number(settings.fxDuration) : 6.5
@@ -1074,7 +1244,7 @@ function BurnFx({ message, settings, price, onClose }) {
 }
 
 /* ---------------- Settings ---------------- */
-function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals }) {
+function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalBurned, onResetGoal }) {
   const [nick, setNick] = useState(settings.nickname)
   const [addr, setAddr] = useState(burnAddress)
   const [addrErr, setAddrErr] = useState('')
@@ -1266,6 +1436,33 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
             <span className="ticker">${TOKEN_SYMBOL}</span>
             <span className="price-usd">$0.00</span>
           </div>
+        </div>
+      </div>
+
+      {/* Burn goal */}
+      <div className="settings-section">
+        <h3>Burn goal</h3>
+        <ToggleRow label="Show burn-goal progress bar" checked={settings.goalEnabled}
+          onChange={v => updateSettings({ goalEnabled: v })} />
+        <span className="form-hint">Counting starts when you enable the goal — burns already in the chat don't count. The total is kept between app restarts.</span>
+        <div className="form-group">
+          <label className="form-label">Goal amount (h173k)</label>
+          <input className="form-input" type="number" min="0" step="any" value={settings.goalTarget || ''}
+            placeholder="e.g. 10000000"
+            onChange={e => updateSettings({ goalTarget: Math.max(0, parseFloat(e.target.value || '0')) })} />
+        </div>
+        <div className="form-group">
+          <label className="form-label">Message shown when the goal is reached</label>
+          <textarea className="form-input" rows={2} value={settings.goalText}
+            onChange={e => updateSettings({ goalText: e.target.value.slice(0, 280) })} />
+        </div>
+        <div className="form-group">
+          <label className="form-label">
+            Counted so far: {formatH173K(goalBurned > 0 ? goalBurned : 0)} h173k
+            {settings.goalTarget > 0 ? ` (${Math.min(100, (Math.max(0, goalBurned) / settings.goalTarget) * 100).toFixed(1)}%)` : ''}
+          </label>
+          <button className="btn btn-secondary" onClick={onResetGoal}>Reset progress</button>
+          <span className="form-hint">Clears the running total and re-arms the goal effect — start a fresh round from now.</span>
         </div>
       </div>
 

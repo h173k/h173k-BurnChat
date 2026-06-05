@@ -107,6 +107,10 @@ export const DEFAULT_CHAT_SETTINGS = {
   fxDim: 85,                  // how much to darken everything behind the effect (0-100 %)
   tickerSize: 13,             // px font size of the h173k ticker in the header
   watchOnly: false,           // watch-only mode: hide controls, show only the chat
+  // --- Burn goal (community burn target) ---
+  goalEnabled: false,         // show the goal progress bar + fire the goal effect
+  goalTarget: 0,              // target amount of h173k to burn (0 = unset)
+  goalText: '🎉 Goal reached! We burned it all down. 🔥',
 }
 
 export const TICKER_SIZE_MIN = 10
@@ -132,6 +136,70 @@ export function getChatSettings() {
 }
 export function saveChatSettings(s) {
   try { localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(s)); return true } catch { return false }
+}
+
+// ========== BURN GOAL PROGRESS (req: cumulative across runs) ==========
+// The goal accumulator must survive restarts: we persist the running total of
+// burned h173k, whether the celebration already fired, the target it was last
+// measured against, and the signatures already counted (so re-fetched messages
+// are never double-counted). `counted` is capped FIFO — re-appearing signatures
+// after a restart are always the most-recent ones, so they stay in the list.
+const GOAL_PROGRESS_KEY = 'h173kbc_goal_progress'
+const COUNTED_CAP = 5000
+
+export const DEFAULT_GOAL_PROGRESS = {
+  burned: 0,        // total h173k counted toward the goal
+  reached: false,   // has the goal effect already been shown for the current target
+  lastTarget: 0,    // the target the `reached` flag refers to
+  started: false,   // has the baseline been set (counting starts when the goal is enabled)
+  counted: [],      // signatures already added to `burned`
+}
+
+// Keep only the newest `cap` items of an array (drops the oldest).
+export function capList(arr, cap = COUNTED_CAP) {
+  if (!Array.isArray(arr)) return []
+  return arr.length > cap ? arr.slice(arr.length - cap) : arr
+}
+
+export function getGoalProgress() {
+  try {
+    const stored = localStorage.getItem(GOAL_PROGRESS_KEY)
+    if (!stored) return { ...DEFAULT_GOAL_PROGRESS }
+    const p = { ...DEFAULT_GOAL_PROGRESS, ...JSON.parse(stored) }
+    if (!Array.isArray(p.counted)) p.counted = []
+    if (!(p.burned >= 0)) p.burned = 0
+    return p
+  } catch { return { ...DEFAULT_GOAL_PROGRESS } }
+}
+export function saveGoalProgress(p) {
+  try { localStorage.setItem(GOAL_PROGRESS_KEY, JSON.stringify(p)); return true } catch { return false }
+}
+export function resetGoalProgress() {
+  try { localStorage.removeItem(GOAL_PROGRESS_KEY); return true } catch { return false }
+}
+
+// ========== BIG-BURN EFFECT STATE (req: big burns keep their effect across runs) ==========
+// Which big burns already triggered their celebration, persisted so the effect
+// is not replayed on every restart, while still letting big burns that happened
+// while the app was closed fire their effect once when we come back online.
+const FX_STATE_KEY = 'h173kbc_fx_celebrated'
+
+export const DEFAULT_FX_STATE = {
+  baseline: false, // has the historical backlog been seeded (avoids a popup storm on first ever run)
+  sigs: [],        // signatures already celebrated
+}
+
+export function getFxState() {
+  try {
+    const stored = localStorage.getItem(FX_STATE_KEY)
+    if (!stored) return { ...DEFAULT_FX_STATE }
+    const s = { ...DEFAULT_FX_STATE, ...JSON.parse(stored) }
+    if (!Array.isArray(s.sigs)) s.sigs = []
+    return s
+  } catch { return { ...DEFAULT_FX_STATE } }
+}
+export function saveFxState(s) {
+  try { localStorage.setItem(FX_STATE_KEY, JSON.stringify(s)); return true } catch { return false }
 }
 
 // ========== REPLENISH SOL SETTINGS (used by useSwap) ==========
