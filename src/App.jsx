@@ -824,10 +824,9 @@ function Main({ connection, onRpcChange, onLock }) {
               {settings.watchOnly ? Icon.eyeOff : Icon.eye}
             </button>
           )}
-          {/* Reload stays available in watch-only mode. On phones the chat is
-              normally refreshed by pulling down, so the button is only shown
-              there when watch-only hides the rest of the controls. */}
-          {view === 'chat' && (!isMobile || settings.watchOnly) && (
+          {/* On phones the chat is refreshed by pulling down (that gesture is
+              active in watch-only mode too), so the button is desktop-only. */}
+          {view === 'chat' && !isMobile && (
             <button className="icon-btn" onClick={doRefresh} title="Reload">{Icon.refresh}</button>
           )}
           {!settings.watchOnly && view === 'chat' && (
@@ -1019,6 +1018,12 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
   const chars = charLength(text)
   const memoPreviewBytes = byteLength((nick ? nick + MEMO_SEP : '') + text)
 
+  // The default target is an unspendable address with no private key, so tokens
+  // sent there are genuinely burned. Once the user points the app at their own
+  // address it is an ordinary transfer, and burn-flavoured wording would be
+  // misleading — so the composer switches to neutral "send" copy.
+  const burning = burnAddress === DEFAULT_BURN_ADDRESS
+
   const buildMemo = () => {
     let n = nick, t = text
     let memo = (n ? n + MEMO_SEP : '') + t
@@ -1108,7 +1113,8 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
     <div className="composer">
       {!nick && <div className="composer-hint">Set a nickname in Settings so others know who you are.</div>}
       <div className="composer-row">
-        <textarea className="form-input composer-text" placeholder="Say something as you burn…"
+        <textarea className="form-input composer-text"
+          placeholder={burning ? 'Say something as you burn…' : 'Write your message here…'}
           value={text} onChange={onText} rows={2} />
       </div>
       <div className="composer-counts">
@@ -1118,7 +1124,7 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
 
       <div className="amount-input-wrapper">
         <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
-          placeholder="Amount to burn (h173k)"
+          placeholder={burning ? 'Amount to burn (h173k)' : 'Amount to send (h173k)'}
           value={amount} onChange={e => onAmount(e.target.value)} />
         <button className="max-btn" disabled={maxBusy} onClick={fillMax}>{maxBusy ? '…' : 'MAX'}</button>
       </div>
@@ -1132,7 +1138,9 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
       {err && <div className="error-message">{err}</div>}
 
       <button className="btn btn-action" disabled={!canSend} onClick={submit}>
-        {busy ? (progress || 'Working…') : <>{Icon.fire}&nbsp;Burn &amp; send</>}
+        {busy
+          ? (progress || 'Working…')
+          : <>{Icon.fire}&nbsp;{burning ? 'Burn & send' : 'Send'}</>}
       </button>
       <div className="composer-target">to {truncateAddress(burnAddress, 6, 6)}</div>
     </div>
