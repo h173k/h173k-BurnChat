@@ -15,6 +15,7 @@ import {
   FX_TEXT_SIZE_MIN, FX_TEXT_SIZE_MAX, FX_VPOS_MIN, FX_VPOS_MAX,
   FX_DIM_MIN, FX_DIM_MAX, TICKER_SIZE_MIN, TICKER_SIZE_MAX,
   MIN_TRIGGER_THRESHOLD, MIN_REPLENISH_TO, MIN_SWAP_PRIORITY_FEE,
+  BALANCE_REFRESH_MIN, BALANCE_REFRESH_MAX, APP_VERSION, BUILD_TIME,
 } from './constants'
 import {
   generateMnemonic, validateMnemonic, importWallet, walletExists, deleteWallet, sessionWallet, changePassword, exportMnemonic,
@@ -45,6 +46,8 @@ const Icon = {
   fire: <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c1 3 4 4.5 4 8a4 4 0 0 1-8 0c0-1 .3-1.8.7-2.5C7 8.5 6 10.5 6 13a6 6 0 0 0 12 0c0-4.5-3.5-7-6-11z"/></svg>,
   close: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
   eye: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+  eyeOff: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>,
+  replay: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>,
   fingerprint: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 11c0 4-1 7-2 9"/><path d="M5.8 8.5A7 7 0 0 1 19 11c0 1 0 2-.2 3"/><path d="M8 11a4 4 0 0 1 8 0c0 4-.5 6-1 8"/><path d="M3.5 11a8.5 8.5 0 0 1 2-5.5"/><path d="M17.5 18.5c.3-1 .5-2.5.5-4.5"/><path d="M12 11v1c0 5-1 8-2.5 10.5"/></svg>,
   share: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V3"/><path d="M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>,
   plusSquare: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>,
@@ -612,7 +615,14 @@ function Main({ connection, onRpcChange, onLock }) {
   // and for messages reloaded after a restart). The hook no longer needs a
   // live callback for the effect.
   const chat = useBurnChat(connection, burnAddress, settings.fetchLimit)
-  const wallet = useChatWallet(connection, sessionWallet)
+  // 0 s = no timer at all; balances then only update on a manual refresh or
+  // after a burn. Anything else is clamped to a sane minimum.
+  const balanceRefreshMs = useMemo(() => {
+    const s = Number(settings.balanceRefreshSec)
+    if (!Number.isFinite(s) || s <= 0) return 0
+    return Math.max(5, Math.min(BALANCE_REFRESH_MAX, s)) * 1000
+  }, [settings.balanceRefreshSec])
+  const wallet = useChatWallet(connection, sessionWallet, balanceRefreshMs)
 
   // local optimistic messages (own sends) merged with chain messages, deduped by signature
   const [localMsgs, setLocalMsgs] = useState([])
@@ -738,6 +748,11 @@ function Main({ connection, onRpcChange, onLock }) {
     setToast({ msg, kind }); setTimeout(() => setToast(null), 4000)
   }, [])
 
+  // Replay a big burn's celebration on demand (tapping the message). Purely a
+  // display action — it doesn't touch the "already celebrated" bookkeeping, so
+  // automatic effects keep firing exactly once as before.
+  const replayFx = useCallback((m) => { if (m) setFxMessage(m) }, [])
+
   const onSent = useCallback((msg) => {
     setLocalMsgs(prev => [msg, ...prev])
     // Instant feedback for your own big burn, and mark it celebrated so the
@@ -769,8 +784,12 @@ function Main({ connection, onRpcChange, onLock }) {
 
   const openSettings = useCallback(() => setView('settings'), [])
 
-  // Pull-to-refresh replaces the reload button on phones.
-  const doRefresh = useCallback(() => chat.refresh(), [chat])
+  // One refresh action for the header button and pull-to-refresh: reload the
+  // chat and re-read the balances in the same gesture.
+  const doRefresh = useCallback(
+    () => Promise.all([chat.refresh(), wallet.refresh()]),
+    [chat, wallet]
+  )
   const { pull, refreshing } = usePullToRefresh({
     enabled: isMobile && view === 'chat',
     onRefresh: doRefresh,
@@ -792,17 +811,29 @@ function Main({ connection, onRpcChange, onLock }) {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {!settings.watchOnly && view === 'chat' && !isMobile && <button className="icon-btn" onClick={() => chat.refresh()} title="Reload">{Icon.refresh}</button>}
+          {/* Watch-only lives here, immediately left of reload, so it can be
+              toggled without going into Settings. */}
+          {view === 'chat' && (
+            <button
+              className={`icon-btn ${settings.watchOnly ? 'active' : ''}`}
+              onClick={() => updateSettings({ watchOnly: !settings.watchOnly })}
+              title={settings.watchOnly ? 'Watch-only is on — tap to leave' : 'Watch-only mode (chat only)'}
+              aria-pressed={settings.watchOnly}
+            >
+              {settings.watchOnly ? Icon.eyeOff : Icon.eye}
+            </button>
+          )}
+          {/* Reload stays available in watch-only mode. On phones the chat is
+              normally refreshed by pulling down, so the button is only shown
+              there when watch-only hides the rest of the controls. */}
+          {view === 'chat' && (!isMobile || settings.watchOnly) && (
+            <button className="icon-btn" onClick={doRefresh} title="Reload">{Icon.refresh}</button>
+          )}
           {!settings.watchOnly && view === 'chat' && (
             <button className="icon-btn" onClick={() => setShowReceive(true)} title="Receive — show address QR">{Icon.qr}</button>
           )}
           {!settings.watchOnly && view === 'chat' && (
             <button className="icon-btn" onClick={() => setView('settings')} title="Settings">{Icon.gear}</button>
-          )}
-          {settings.watchOnly && view === 'chat' && (
-            <button className="icon-btn" onClick={() => updateSettings({ watchOnly: false })} title="Exit watch-only">
-              {Icon.eye}
-            </button>
           )}
         </div>
       </header>
@@ -815,6 +846,7 @@ function Main({ connection, onRpcChange, onLock }) {
           onBack={() => setView('chat')}
           pubkey={pubkey} h173kDecimals={getH173KDecimals()}
           goalBurned={goalProgress.burned} onResetGoal={resetGoal}
+          wallet={wallet}
         />
       ) : (
         <ChatView
@@ -828,6 +860,7 @@ function Main({ connection, onRpcChange, onLock }) {
           onOpenSettings={openSettings}
           draftText={draftText} setDraftText={setDraftText}
           draftAmount={draftAmount} setDraftAmount={setDraftAmount}
+          onReplayFx={replayFx}
         />
       )}
 
@@ -852,7 +885,7 @@ function PriceTag({ price, tickerSize }) {
 }
 
 /* ---------------- Chat ---------------- */
-function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalBurned, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount }) {
+function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalBurned, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount, onReplayFx }) {
   const displayAmount = useCallback((amt) => {
     if (settings.displayUnit === UNIT_USDT && price.price != null) return formatUSD(amt * price.price)
     return `${formatH173K(amt)} ${TOKEN_TICKER}`
@@ -916,11 +949,15 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
               : 'No burns yet. Be the first to burn and leave a message.'}
           </div>
         )}
-        {messages.map(m => (
-          <MessageRow key={m.signature} m={m} displayAmount={displayAmount}
-            mine={pubkey && m.sender === pubkey.toString()}
-            big={settings.fxThreshold > 0 && m.amount >= settings.fxThreshold} />
-        ))}
+        {messages.map(m => {
+          const big = settings.fxThreshold > 0 && m.amount >= settings.fxThreshold
+          return (
+            <MessageRow key={m.signature} m={m} displayAmount={displayAmount}
+              mine={pubkey && m.sender === pubkey.toString()}
+              big={big}
+              onReplay={big && settings.fxReplayOnTap !== false ? onReplayFx : null} />
+          )
+        })}
       </div>
 
       {!settings.watchOnly && (
@@ -932,11 +969,25 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
   )
 }
 
-function MessageRow({ m, displayAmount, mine, big }) {
+function MessageRow({ m, displayAmount, mine, big, onReplay }) {
   const sig = m.signature
   const explorer = `https://solscan.io/tx/${sig}`
+  // Tapping a big burn replays its effect (opt-in setting). The tx link and any
+  // selected text are excluded so copying a message still works normally.
+  const handleClick = onReplay
+    ? (e) => {
+        if (e.target.closest('a')) return
+        if (window.getSelection && String(window.getSelection()).length) return
+        onReplay(m)
+      }
+    : undefined
   return (
-    <div className={`msg ${mine ? 'mine' : ''} ${big ? 'msg-big' : ''}`}>
+    <div className={`msg ${mine ? 'mine' : ''} ${big ? 'msg-big' : ''} ${onReplay ? 'msg-replay' : ''}`}
+      onClick={handleClick}
+      role={onReplay ? 'button' : undefined}
+      tabIndex={onReplay ? 0 : undefined}
+      onKeyDown={onReplay ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onReplay(m) } } : undefined}
+      title={onReplay ? 'Tap to replay the effect' : undefined}>
       <div className="msg-head">
         <span className="msg-nick">{m.nick ? m.nick : 'anon'}</span>
         {big && <span className="msg-big-badge">{Icon.fire} BIG BURN</span>}
@@ -947,7 +998,10 @@ function MessageRow({ m, displayAmount, mine, big }) {
       <div className="msg-text">{m.text || <span className="dim">(no text)</span>}</div>
       <div className="msg-foot">
         <span className={`msg-burn ${big ? 'msg-burn-big' : ''}`}>{Icon.fire}<span>{displayAmount(m.amount)}</span></span>
-        <a className="msg-link" href={explorer} target="_blank" rel="noreferrer noopener">tx</a>
+        <span className="msg-foot-right">
+          {onReplay && <span className="msg-replay-hint">{Icon.replay} replay</span>}
+          <a className="msg-link" href={explorer} target="_blank" rel="noreferrer noopener">tx</a>
+        </span>
       </div>
     </div>
   )
@@ -958,6 +1012,7 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState('')
   const [err, setErr] = useState('')
+  const [maxBusy, setMaxBusy] = useState(false)
 
   const nick = settings.nickname || ''
   const chars = charLength(text)
@@ -991,6 +1046,26 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
   // button never lit up. We accept commas and convert them to a dot.
   const onAmount = (raw) => setAmount(sanitizeDecimal(raw))
 
+  /* MAX. With h173k in the wallet that's simply the token balance. A wallet
+     funded with SOL only would otherwise get 0, so we ask the pool what the
+     spendable SOL (after rent + fees) is worth in h173k. */
+  const fillMax = async () => {
+    if (wallet.h173kBalance > 0) { setAmount(String(wallet.h173kBalance)); return }
+    if (!wallet.estimateMaxBurnable) { setAmount(String(wallet.h173kBalance)); return }
+    setMaxBusy(true); setErr('')
+    try {
+      const { total } = await wallet.estimateMaxBurnable(burnAddress)
+      if (total > 0) {
+        setAmount(String(Number(total.toFixed(6))))
+        showToast?.('Estimated from your SOL balance')
+      } else {
+        setErr('Not enough SOL left to cover account rent and fees.')
+      }
+    } catch (e) {
+      setErr(e?.message || 'Could not estimate the maximum')
+    } finally { setMaxBusy(false) }
+  }
+
   const submit = async () => {
     setErr('')
     const amt = parseFloat(amount)
@@ -1000,7 +1075,7 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
     if (byteLength(memo) > MAX_MEMO_BYTES) { setErr('Message is too long (max 500 bytes)'); return }
 
     // need either h173k or SOL to fund the burn
-    if (wallet.h173kBalance <= 0 && wallet.solBalance <= 0.01) {
+    if (wallet.h173kBalance <= 0 && wallet.solBalance <= 0) {
       setErr('Fund the account with h173k or SOL first'); return
     }
 
@@ -1044,11 +1119,11 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
         <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
           placeholder="Amount to burn (h173k)"
           value={amount} onChange={e => onAmount(e.target.value)} />
-        <button className="max-btn" onClick={() => setAmount(String(wallet.h173kBalance))}>MAX</button>
+        <button className="max-btn" disabled={maxBusy} onClick={fillMax}>{maxBusy ? '…' : 'MAX'}</button>
       </div>
       <div className="composer-counts">
         <span className="dim">Balance: {formatH173K(wallet.h173kBalance)} h173k · {formatNumber(wallet.solBalance, 4)} SOL</span>
-        {parseFloat(amount) > wallet.h173kBalance && wallet.solBalance > 0.01 && (
+        {parseFloat(amount) > wallet.h173kBalance && wallet.solBalance > 0 && (
           <span className="dim">not enough h173k → SOL will be converted</span>
         )}
       </div>
@@ -1244,7 +1319,7 @@ function BurnFx({ message, settings, price, onClose }) {
 }
 
 /* ---------------- Settings ---------------- */
-function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalBurned, onResetGoal }) {
+function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalBurned, onResetGoal, wallet }) {
   const [nick, setNick] = useState(settings.nickname)
   const [addr, setAddr] = useState(burnAddress)
   const [addrErr, setAddrErr] = useState('')
@@ -1274,6 +1349,27 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
     const n = parseFloat(v)
     updateSettings({ minBurnFilter: isNaN(n) ? 0 : Math.max(0, n) })
   }
+  // Balance refresh: local string buffer so the field can be cleared while
+  // typing without the parsed value fighting the input.
+  const [refreshStr, setRefreshStr] = useState(String(settings.balanceRefreshSec ?? 20))
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshMsg, setRefreshMsg] = useState('')
+  const onRefreshSec = (raw) => {
+    const v = String(raw).replace(/[^0-9]/g, '')
+    setRefreshStr(v)
+    const n = parseInt(v || '0', 10)
+    updateSettings({
+      balanceRefreshSec: isNaN(n) ? 0 : Math.max(BALANCE_REFRESH_MIN, Math.min(BALANCE_REFRESH_MAX, n)),
+    })
+  }
+  const refreshNow = async () => {
+    if (refreshing) return
+    setRefreshing(true); setRefreshMsg('')
+    try { await wallet?.refresh?.(); setRefreshMsg('Balances updated ✓') }
+    catch (e) { setRefreshMsg(e?.message || 'Could not refresh') }
+    finally { setRefreshing(false); setTimeout(() => setRefreshMsg(''), 3000) }
+  }
+
   const [confirmDelete, setConfirmDelete] = useState(false)
   // Biometric unlock
   const [bioSupported, setBioSupported] = useState(false)
@@ -1424,9 +1520,9 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
           <input className="form-input" type="number" min="0" max="9" value={decimals}
             onChange={e => { const v = Math.max(0, Math.min(9, parseInt(e.target.value || '0', 10))); setDecimals(v); saveH173KDecimals(v) }} />
         </div>
-        <ToggleRow label="Watch-only mode (hide controls, show chat only)"
-          checked={settings.watchOnly} onChange={v => updateSettings({ watchOnly: v })} />
-        <span className="form-hint">Hides the composer and toolbar. Tap the eye icon in the header to leave.</span>
+        <span className="form-hint">
+          Watch-only mode moved to the header — tap the eye icon next to reload to switch it on or off.
+        </span>
         <div className="form-group" style={{ marginTop: 20 }}>
           <label className="form-label">Ticker &amp; price size in header (px): {settings.tickerSize}</label>
           <input type="range" min={TICKER_SIZE_MIN} max={TICKER_SIZE_MAX} step="1"
@@ -1470,6 +1566,10 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
       <div className="settings-section">
         <h3>Big-burn effect</h3>
         <ToggleRow label="Enable animated effect" checked={settings.fxEnabled} onChange={v => updateSettings({ fxEnabled: v })} />
+        <ToggleRow label="Replay the effect when tapping a big-burn message"
+          checked={settings.fxReplayOnTap !== false}
+          onChange={v => updateSettings({ fxReplayOnTap: v })} />
+        <span className="form-hint">Tap any highlighted big burn in the chat to watch its effect again.</span>
         <div className="form-group">
           <label className="form-label">Trigger when burn ≥ (h173k)</label>
           <input className="form-input" type="number" min="0" step="any" value={settings.fxThreshold}
@@ -1509,6 +1609,37 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
             value={settings.fxDim}
             onChange={e => updateSettings({ fxDim: Math.min(FX_DIM_MAX, Math.max(FX_DIM_MIN, parseInt(e.target.value, 10))) })} />
           <span className="form-hint">Dims the chat behind the effect so the text stays readable. 0% = none, 100% = fully black.</span>
+        </div>
+      </div>
+
+      {/* Balances */}
+      <div className="settings-section">
+        <h3>Balances</h3>
+        <div className="settings-item">
+          <span>h173k</span>
+          <span className="address-small">{formatH173K(wallet?.h173kBalance || 0)}</span>
+        </div>
+        <div className="settings-item">
+          <span>SOL</span>
+          <span className="address-small">{formatNumber(wallet?.solBalance || 0, 6)}</span>
+        </div>
+        <div className="form-group">
+          <button className="btn btn-secondary" style={{ width: '100%' }} onClick={refreshNow} disabled={refreshing}>
+            {refreshing ? 'Refreshing…' : 'Refresh balances now'}
+          </button>
+          {refreshMsg && <span className="form-hint">{refreshMsg}</span>}
+          {wallet?.lastUpdated && !refreshMsg && (
+            <span className="form-hint">Last updated {timeAgo(Math.floor(wallet.lastUpdated / 1000))}.</span>
+          )}
+        </div>
+        <div className="form-group">
+          <label className="form-label">Auto-refresh every (seconds)</label>
+          <input className="form-input" type="text" inputMode="numeric" autoComplete="off" placeholder="20"
+            value={refreshStr} onChange={e => onRefreshSec(e.target.value)} />
+          <span className="form-hint">
+            0 = off (manual refresh only). Values under 5 s are treated as 5 s. Higher values mean fewer
+            RPC calls — useful on rate-limited endpoints.
+          </span>
         </div>
       </div>
 
@@ -1581,6 +1712,13 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
             </div>
           </div>
         )}
+      </div>
+
+      {/* Version — last thing in Settings so it's easy to find when reporting issues */}
+      <div className="app-version">
+        <span className="app-version-name">Burn Chat</span>
+        <span className="app-version-num">v{APP_VERSION}</span>
+        {BUILD_TIME && <span className="app-version-build">build {BUILD_TIME.slice(0, 10)}</span>}
       </div>
 
       <div style={{ height: 40 }} />

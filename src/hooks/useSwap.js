@@ -3,7 +3,7 @@
  * Swaps directly on Raydium CPMM pool without external API
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { 
   Connection, 
   PublicKey, 
@@ -65,11 +65,18 @@ function getCPMMAuthority() {
 /**
  * Hook for direct Raydium CPMM pool swapping
  */
+// Cached pool reserves older than this are refetched before we price a swap
+// that is about to be executed. Reserves move with every trade, and a stale
+// quote produces a wrong minimum-output (slippage failure) or a bad estimate.
+const POOL_CACHE_MS = 8000
+
 export function useSwap(connection, wallet) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [quote, setQuote] = useState(null)
   const [poolInfo, setPoolInfo] = useState(null)
+  const poolRef = useRef(null)
+  const poolAtRef = useRef(0)
   
   /**
    * Fetch pool reserves from vault accounts
@@ -98,6 +105,8 @@ export function useSwap(connection, wallet) {
       console.log('Token 1 Reserve:', pool.token1Reserve.toString())
       console.log('Is H173K Token 0:', pool.isH173KToken0)
       
+      poolRef.current = pool
+      poolAtRef.current = Date.now()
       setPoolInfo(pool)
       return pool
     } catch (err) {
@@ -106,6 +115,16 @@ export function useSwap(connection, wallet) {
     }
   }, [connection])
   
+  /**
+   * Pool reserves, refetched when the cached copy is stale. Every quote that
+   * feeds an actual transaction goes through here, so we never sign a swap
+   * priced against reserves from minutes ago.
+   */
+  const getPool = useCallback(async () => {
+    if (poolRef.current && Date.now() - poolAtRef.current < POOL_CACHE_MS) return poolRef.current
+    return await fetchPoolData()
+  }, [fetchPoolData])
+
   /**
    * Calculate swap output using constant product formula
    * Fee: 0.25% (25 bps) for CPMM
@@ -130,11 +149,8 @@ export function useSwap(connection, wallet) {
     setError(null)
     
     try {
-      let pool = poolInfo
-      if (!pool) {
-        pool = await fetchPoolData()
-      }
-      
+      const pool = await getPool()
+
       const inputLamports = BigInt(Math.floor(inputAmount * Math.pow(10, TOKEN_DECIMALS)))
       
       // Determine reserves based on token position
@@ -164,7 +180,7 @@ export function useSwap(connection, wallet) {
     } finally {
       setLoading(false)
     }
-  }, [poolInfo, fetchPoolData, calculateOutput])
+  }, [getPool, calculateOutput])
   
   /**
    * Get swap quote (SOL -> H173K)
@@ -174,11 +190,8 @@ export function useSwap(connection, wallet) {
     setError(null)
     
     try {
-      let pool = poolInfo
-      if (!pool) {
-        pool = await fetchPoolData()
-      }
-      
+      const pool = await getPool()
+
       const inputLamports = BigInt(Math.floor(solAmount * LAMPORTS_PER_SOL))
       
       const reserveH173K = pool.isH173KToken0 ? pool.token0Reserve : pool.token1Reserve
@@ -204,7 +217,7 @@ export function useSwap(connection, wallet) {
     } finally {
       setLoading(false)
     }
-  }, [poolInfo, fetchPoolData, calculateOutput])
+  }, [getPool, calculateOutput])
 
   /**
    * Reverse quote: how much SOL is needed to receive `targetH173k` h173k out.
@@ -212,8 +225,7 @@ export function useSwap(connection, wallet) {
    * / rounding never leaves us short. Returns SOL (number).
    */
   const quoteSOLForH173K = useCallback(async (targetH173k, bufferPct = 4) => {
-    let pool = poolInfo
-    if (!pool) pool = await fetchPoolData()
+    const pool = await getPool()
 
     const reserveH173K = pool.isH173KToken0 ? pool.token0Reserve : pool.token1Reserve // raw
     const reserveSOL = pool.isH173KToken0 ? pool.token1Reserve : pool.token0Reserve   // lamports
@@ -230,7 +242,7 @@ export function useSwap(connection, wallet) {
     let sol = Number(amountInLamports) / LAMPORTS_PER_SOL
     sol = sol * (1 + bufferPct / 100)
     return sol
-  }, [poolInfo, fetchPoolData])
+  }, [getPool])
 
   /**
    * Create CPMM swap instruction
@@ -479,10 +491,7 @@ export function useSwap(connection, wallet) {
    * Calculate how much H173K needed for target SOL
    */
   const calculateSwapForSOL = useCallback(async (targetSOL) => {
-    let pool = poolInfo
-    if (!pool) {
-      pool = await fetchPoolData()
-    }
+    const pool = await getPool()
     
     const reserveH173K = pool.isH173KToken0 ? pool.token0Reserve : pool.token1Reserve
     const reserveSOL = pool.isH173KToken0 ? pool.token1Reserve : pool.token0Reserve
@@ -498,7 +507,7 @@ export function useSwap(connection, wallet) {
     const quote = await getSwapQuote(h173kNeeded * 1.02)
     
     return { h173kNeeded: quote.inputAmount, solOutput: quote.outputAmount, quote }
-  }, [poolInfo, fetchPoolData, getSwapQuote])
+  }, [getPool, getSwapQuote])
   
   /**
    * Check if auto-replenish is possible
@@ -646,10 +655,18 @@ export function useSwap(connection, wallet) {
     // Calculate how much H173K we need to swap
     const { h173kNeeded, quote } = await calculateSwapForSOL(targetSOL)
     
-    // Check H173K balance
+    // Check H173K balance. A wallet that was funded with SOL only has no h173k
+    // token account yet — getTokenAccountBalance throws on a missing account, so
+    // treat that as a zero balance and fail with the clear NO_H173K message
+    // instead of a raw RPC error.
     const tokenAccount = await getAssociatedTokenAddress(TOKEN_MINT, wallet.publicKey)
-    const tokenBalance = await connection.getTokenAccountBalance(tokenAccount)
-    const h173kBalance = Number(tokenBalance.value.uiAmount)
+    let h173kBalance = 0
+    try {
+      const tokenBalance = await connection.getTokenAccountBalance(tokenAccount)
+      h173kBalance = Number(tokenBalance.value.uiAmount) || 0
+    } catch {
+      h173kBalance = 0
+    }
     
     console.log(`🪙 H173K needed: ${h173kNeeded.toFixed(2)}, H173K balance: ${h173kBalance.toFixed(2)}`)
     
@@ -711,11 +728,14 @@ export function useSwap(connection, wallet) {
       const WSOL_ATA_RENT = 0.00204
       const actualSwapFloor = WSOL_ATA_RENT + swapTxCost  // 0.002145 — min do kolejnego swapa
 
+      // Total SOL the operation itself will consume (fees + any rent it pays).
+      const totalNeeded = TARGET
+
       const needsReplenish =
       (
         currentSOL < settings.threshold ||
         (extraSOLNeeded > 0 && currentSOL < totalNeeded) ||
-        (currentSOL - extraSOLNeeded < settings.replenishTo + actualSwapFloor)  // ← NOWY WARUNEK
+        (currentSOL - extraSOLNeeded < settings.replenishTo + actualSwapFloor)
       ) &&
       currentSOL >= swapTxCost
 

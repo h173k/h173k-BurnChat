@@ -1,5 +1,13 @@
 import { PublicKey } from '@solana/web3.js'
 
+// ========== APP VERSION ==========
+// Injected at build time from package.json (see vite.config.js `define`).
+// The fallbacks keep things working if the app is run without the define.
+export const APP_VERSION =
+  typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0-dev'
+export const BUILD_TIME =
+  typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : ''
+
 // ========== NETWORK ==========
 export const NETWORK = 'mainnet-beta'
 // Public default RPC. Strongly recommend setting your own in Settings (Helius/QuickNode/etc).
@@ -107,11 +115,17 @@ export const DEFAULT_CHAT_SETTINGS = {
   fxDim: 85,                  // how much to darken everything behind the effect (0-100 %)
   tickerSize: 13,             // px font size of the h173k ticker in the header
   watchOnly: false,           // watch-only mode: hide controls, show only the chat
+                              // (toggled from the header eye button, not from Settings)
+  fxReplayOnTap: true,        // tapping a big-burn message replays its effect
+  balanceRefreshSec: 20,      // how often balances are refreshed (0 = manual only)
   // --- Burn goal (community burn target) ---
   goalEnabled: false,         // show the goal progress bar + fire the goal effect
   goalTarget: 0,              // target amount of h173k to burn (0 = unset)
   goalText: '🎉 Goal reached! We burned it all down. 🔥',
 }
+
+export const BALANCE_REFRESH_MIN = 0    // 0 = manual refresh only
+export const BALANCE_REFRESH_MAX = 3600 // 1 hour
 
 export const TICKER_SIZE_MIN = 10
 export const TICKER_SIZE_MAX = 32
@@ -205,6 +219,10 @@ export function saveFxState(s) {
 // ========== REPLENISH SOL SETTINGS (used by useSwap) ==========
 const REPLENISH_SETTINGS_KEY = 'h173kbc_replenish_settings'
 export const WSOL_ATA_RENT = 0.00204
+// Rent for one SPL associated-token-account (same size as the WSOL one).
+export const ATA_RENT = 0.00204
+// Solana base signature fee.
+export const BASE_TX_FEE = 0.000005
 export const MIN_SWAP_PRIORITY_FEE = 0.0001
 export const MIN_TRIGGER_THRESHOLD = 2 * WSOL_ATA_RENT
 export const MIN_REPLENISH_TO = 3 * WSOL_ATA_RENT

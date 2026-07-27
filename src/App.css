@@ -274,6 +274,19 @@ body {
   animation: bouncePress 0.15s ease-out;
 }
 
+/* Toggled-on state for the watch-only eye button, so the mode is obvious
+   at a glance now that it no longer lives in Settings. */
+.icon-btn.active {
+  border-color: rgba(255, 140, 40, 0.65);
+  color: #ffae42;
+  background: rgba(255, 122, 26, 0.12);
+}
+
+.icon-btn.active:hover {
+  border-color: rgba(255, 160, 60, 0.9);
+  color: #ffc978;
+}
+
 /* === Loading Screen === */
 .loading-screen {
   display: flex;
@@ -3048,6 +3061,23 @@ body {
 .msg-link { font-size: 11px; color: var(--color-white-30); text-decoration: none; }
 .msg-link:hover { color: var(--color-white-70); }
 
+/* Replayable big burns: tapping the bubble plays its effect again. The text
+   itself stays selectable — the tap handler ignores taps that made a selection. */
+.msg-replay { cursor: pointer; }
+.msg-replay:hover { border-color: rgba(255, 170, 70, 0.8); }
+.msg-replay:active { transform: scale(0.995); }
+.msg-replay:focus-visible {
+  outline: 2px solid rgba(255, 170, 70, 0.8);
+  outline-offset: 2px;
+}
+.msg-replay-hint {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: rgba(255, 174, 66, 0.75);
+  margin-left: auto; margin-right: 12px;
+  white-space: nowrap;
+}
+.msg-replay-hint svg { flex: 0 0 auto; }
+
 /* Composer */
 .composer {
   position: sticky; bottom: 0;
@@ -3319,3 +3349,31 @@ input[type="range"]::-moz-range-thumb {
   color: var(--color-white);
 }
 .install-step b { font-weight: var(--font-medium); }
+
+/* === App version (bottom of Settings) === */
+/* Kept deliberately plain and last in the list so it's easy to find and quote
+   when reporting a problem — PWAs cache hard, so knowing the running build matters. */
+.app-version {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px 4px 4px;
+  font-size: 12px;
+  color: var(--color-gray-faded);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.app-version-name {
+  font-weight: var(--font-medium);
+  color: var(--color-white-50);
+}
+.app-version-num {
+  font-family: monospace;
+  color: var(--color-white-70);
+}
+.app-version-build {
+  font-family: monospace;
+  font-size: 11px;
+}
