@@ -121,11 +121,19 @@ export const DEFAULT_CHAT_SETTINGS = {
   // --- Burn goal (community burn target) ---
   goalEnabled: false,         // show the goal progress bar + fire the goal effect
   goalTarget: 0,              // target amount of h173k to burn (0 = unset)
+  goalTitle: '',              // heading on the progress bar in chat ('' = "Burn goal")
+  goalTitleSize: 13,          // px font size of that heading
   goalText: '🎉 Goal reached! We burned it all down. 🔥',
 }
 
 export const BALANCE_REFRESH_MIN = 0    // 0 = manual refresh only
 export const BALANCE_REFRESH_MAX = 3600 // 1 hour
+
+// Goal title shown on the progress bar in chat. It wraps inside the panel, so
+// it no longer has to fit on a single line.
+export const GOAL_TITLE_MAX = 80
+export const GOAL_TITLE_SIZE_MIN = 11
+export const GOAL_TITLE_SIZE_MAX = 32
 
 export const TICKER_SIZE_MIN = 10
 export const TICKER_SIZE_MAX = 32

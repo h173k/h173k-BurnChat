@@ -3190,15 +3190,29 @@ body {
   box-shadow: 0 0 0 1px rgba(60,220,140,0.14), 0 6px 22px rgba(20,200,110,0.12);
 }
 .goal-bar-head {
-  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+  /* Top-aligned so the percentage stays level with the first line of the
+     title even when the title wraps onto several lines. */
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 8px; gap: 10px;
 }
 .goal-bar-title {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 13px; font-weight: var(--font-bold); color: #ffce8a;
+  display: flex; align-items: flex-start; gap: 6px;
+  font-weight: var(--font-bold); color: #ffce8a;
+  /* Takes the space the percentage doesn't need, and wraps inside it instead
+     of being cut off. Font size is user-configurable and set inline. */
+  flex: 1 1 auto; min-width: 0; line-height: 1.3;
 }
 .goal-bar.reached .goal-bar-title { color: #7af0b0; }
-.goal-bar-title svg { width: 15px; height: 15px; }
-.goal-bar-pct { font-size: 14px; font-weight: var(--font-bold); color: #ffae42; }
+.goal-bar-title-ic { flex: 0 0 auto; display: inline-flex; margin-top: 0.12em; }
+/* Icon scales with the chosen title size instead of being pinned to 15px. */
+.goal-bar-title-ic svg { width: 1em; height: 1em; display: block; }
+.goal-bar-title-text {
+  min-width: 0;
+  /* Wrap on word boundaries, but still break a single very long word rather
+     than letting it overflow the panel. */
+  overflow-wrap: anywhere; word-break: break-word;
+}
+.goal-bar-pct { font-size: 14px; font-weight: var(--font-bold); color: #ffae42; flex: 0 0 auto; }
 .goal-bar.reached .goal-bar-pct { color: #5fe39a; }
 .goal-bar-track {
   height: 10px; border-radius: 999px; overflow: hidden;
@@ -3225,6 +3239,14 @@ body {
 .fx-overlay.goal-fx .fx-label { color: #7af0b0; }
 
 /* nickname preview in settings */
+.goal-title-preview {
+  /* Mirrors .goal-bar-title so the preview wraps exactly like the real bar. */
+  display: flex; align-items: flex-start; gap: 6px;
+  margin-top: 10px; padding: 10px 12px;
+  border: 1px solid rgba(255,140,40,0.28); border-radius: var(--border-radius-md);
+  background: rgba(255,122,26,0.06);
+  font-weight: var(--font-bold); color: #ffce8a; line-height: 1.3;
+}
 .fx-nick-preview {
   margin-top: 10px; text-align: center; font-weight: var(--font-bold);
   color: #ffce8a; line-height: 1.2; word-break: break-word;

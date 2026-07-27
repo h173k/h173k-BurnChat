@@ -15,7 +15,8 @@ import {
   FX_TEXT_SIZE_MIN, FX_TEXT_SIZE_MAX, FX_VPOS_MIN, FX_VPOS_MAX,
   FX_DIM_MIN, FX_DIM_MAX, TICKER_SIZE_MIN, TICKER_SIZE_MAX,
   MIN_TRIGGER_THRESHOLD, MIN_REPLENISH_TO, MIN_SWAP_PRIORITY_FEE,
-  BALANCE_REFRESH_MIN, BALANCE_REFRESH_MAX, APP_VERSION, BUILD_TIME,
+  BALANCE_REFRESH_MIN, BALANCE_REFRESH_MAX, GOAL_TITLE_MAX,
+  GOAL_TITLE_SIZE_MIN, GOAL_TITLE_SIZE_MAX, APP_VERSION, BUILD_TIME,
 } from './constants'
 import {
   generateMnemonic, validateMnemonic, importWallet, walletExists, deleteWallet, sessionWallet, changePassword, exportMnemonic,
@@ -1224,10 +1225,16 @@ function GoalBar({ settings, burned, displayAmount }) {
   const total = burned > 0 ? burned : 0
   const pct = Math.min(100, (total / settings.goalTarget) * 100)
   const reached = total >= settings.goalTarget
+  // Custom title falls back to the generic label when left empty.
+  const title = (settings.goalTitle || '').trim() || 'Burn goal'
+  const titleSize = Number(settings.goalTitleSize) > 0 ? Number(settings.goalTitleSize) : 13
   return (
     <div className={`goal-bar ${reached ? 'reached' : ''}`}>
       <div className="goal-bar-head">
-        <span className="goal-bar-title">{Icon.fire} Burn goal</span>
+        <span className="goal-bar-title" style={{ fontSize: titleSize }}>
+          <span className="goal-bar-title-ic">{Icon.fire}</span>
+          <span className="goal-bar-title-text">{title}</span>
+        </span>
         <span className="goal-bar-pct">{reached ? '100' : pct.toFixed(pct < 10 ? 2 : 1)}%</span>
       </div>
       <div className="goal-bar-track">
@@ -1541,6 +1548,30 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         <ToggleRow label="Show burn-goal progress bar" checked={settings.goalEnabled}
           onChange={v => updateSettings({ goalEnabled: v })} />
         <span className="form-hint">Counting starts when you enable the goal — burns already in the chat don't count. The total is kept between app restarts.</span>
+        <div className="form-group">
+          <label className="form-label">Goal title (shown on the bar in chat)</label>
+          <input className="form-input" type="text" maxLength={GOAL_TITLE_MAX}
+            placeholder="Burn goal"
+            value={settings.goalTitle || ''}
+            onChange={e => updateSettings({ goalTitle: e.target.value.slice(0, GOAL_TITLE_MAX) })} />
+          <span className="form-hint">
+            Name this round — e.g. “Road to 10M” or “Weekend burn”. Leave empty to show “Burn goal”.
+            Long titles wrap onto more lines inside the bar.
+            {` ${(settings.goalTitle || '').length}/${GOAL_TITLE_MAX}`}
+          </span>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Goal title size (px): {settings.goalTitleSize ?? 13}</label>
+          <input type="range" min={GOAL_TITLE_SIZE_MIN} max={GOAL_TITLE_SIZE_MAX} step="1"
+            value={settings.goalTitleSize ?? 13}
+            onChange={e => updateSettings({
+              goalTitleSize: Math.min(GOAL_TITLE_SIZE_MAX, Math.max(GOAL_TITLE_SIZE_MIN, parseInt(e.target.value, 10)))
+            })} />
+          <div className="goal-title-preview" style={{ fontSize: settings.goalTitleSize ?? 13 }}>
+            <span className="goal-bar-title-ic">{Icon.fire}</span>
+            <span className="goal-bar-title-text">{(settings.goalTitle || '').trim() || 'Burn goal'}</span>
+          </div>
+        </div>
         <div className="form-group">
           <label className="form-label">Goal amount (h173k)</label>
           <input className="form-input" type="number" min="0" step="any" value={settings.goalTarget || ''}
