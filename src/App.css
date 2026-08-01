@@ -3414,3 +3414,27 @@ input[type="range"]::-moz-range-thumb {
   background: var(--color-white-10);
   color: var(--color-white-50);
 }
+
+/* === "Burn X to get on screen" notice === */
+/* Sits under the goal bar and above the message list. Deliberately readable
+   from a distance: this is usually being shown to an audience, not just read
+   by the person holding the phone. */
+.fx-notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 140, 40, 0.3);
+  border-radius: var(--border-radius-md);
+  background: linear-gradient(180deg, rgba(255, 122, 26, 0.12), rgba(255, 122, 26, 0.05));
+  color: #ffce8a;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: center;
+}
+.fx-notice-ic { flex: 0 0 auto; display: inline-flex; }
+.fx-notice-ic svg { width: 15px; height: 15px; display: block; }
+.fx-notice-text { min-width: 0; overflow-wrap: anywhere; }
+.fx-notice strong { color: #ffae42; font-weight: var(--font-bold); }

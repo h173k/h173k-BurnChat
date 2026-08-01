@@ -117,6 +117,8 @@ export const DEFAULT_CHAT_SETTINGS = {
   watchOnly: false,           // watch-only mode: hide controls, show only the chat
                               // (toggled from the header eye button, not from Settings)
   fxReplayOnTap: true,        // tapping a big-burn message replays its effect
+  fxNoticeEnabled: true,      // show "burn X to get on screen" above the chat, so
+                              // people watching an observer's screen know the bar
   balanceRefreshSec: 20,      // how often balances are refreshed (0 = manual only)
   // --- Burn goal (community burn target) ---
   goalEnabled: false,         // show the goal progress bar + fire the goal effect

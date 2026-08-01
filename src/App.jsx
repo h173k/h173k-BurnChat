@@ -985,6 +985,8 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
 
       <GoalBar settings={settings} burned={goalBurned} displayAmount={displayAmount} />
 
+      <FxThresholdNotice settings={settings} displayAmount={displayAmount} />
+
       {showRpcBanner && (
         <div className="rpc-banner">
           <div className="rpc-banner-text">
@@ -1291,6 +1293,27 @@ function DepositPrompt({ pubkey, onClose }) {
 }
 
 /* ---------------- Special effect overlay (req 13) ---------------- */
+/**
+ * Tells everyone what it takes to get a message on screen.
+ *
+ * The threshold is a local setting, so a sender's own copy of the app can't
+ * know what an observer has configured. This notice is therefore aimed at the
+ * observer's display — the screen an audience is actually looking at — which
+ * is why it stays visible in watch-only mode.
+ */
+function FxThresholdNotice({ settings, displayAmount }) {
+  if (!settings.fxNoticeEnabled) return null
+  if (!settings.fxEnabled || !(settings.fxThreshold > 0)) return null
+  return (
+    <div className="fx-notice">
+      <span className="fx-notice-ic">{Icon.fire}</span>
+      <span className="fx-notice-text">
+        Burn <strong>{displayAmount(settings.fxThreshold)}</strong> or more to put your message on screen
+      </span>
+    </div>
+  )
+}
+
 function GoalBar({ settings, burned, displayAmount }) {
   if (!settings.goalEnabled || !(settings.goalTarget > 0)) return null
   const total = burned > 0 ? burned : 0
@@ -1770,6 +1793,14 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
             onChange={e => updateSettings({ fxThreshold: Math.max(0, parseFloat(e.target.value || '0')) })} />
           <span className="form-hint">Big burns also get a highlighted bubble in the chat with a larger amount.</span>
         </div>
+        <ToggleRow label="Show this threshold above the chat"
+          checked={settings.fxNoticeEnabled !== false}
+          onChange={v => updateSettings({ fxNoticeEnabled: v })} />
+        <span className="form-hint">
+          Adds a line reading “Burn {formatH173K(settings.fxThreshold)} {TOKEN_TICKER} or more to put your
+          message on screen”. The threshold is stored locally, so a sender's own app can't know what you've
+          set — show this on the screen your audience is watching. It stays visible in watch-only mode.
+        </span>
         <div className="form-group">
           <label className="form-label">Show effect for (seconds): {Number(settings.fxDuration).toFixed(1)}</label>
           <input type="range" min={FX_DURATION_MIN} max={FX_DURATION_MAX} step="0.5"
