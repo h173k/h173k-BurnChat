@@ -3399,3 +3399,18 @@ input[type="range"]::-moz-range-thumb {
   font-family: monospace;
   font-size: 11px;
 }
+
+/* Paused badge on the goal bar — the goal keeps its total, it just stops counting. */
+.goal-bar-paused {
+  flex: 0 0 auto;
+  align-self: center;
+  font-size: 10px;
+  font-weight: var(--font-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--color-white-20);
+  background: var(--color-white-10);
+  color: var(--color-white-50);
+}

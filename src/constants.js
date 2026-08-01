@@ -123,7 +123,16 @@ export const DEFAULT_CHAT_SETTINGS = {
   goalTarget: 0,              // target amount of h173k to burn (0 = unset)
   goalTitle: '',              // heading on the progress bar in chat ('' = "Burn goal")
   goalTitleSize: 13,          // px font size of that heading
+  goalPaused: false,          // freeze counting without clearing the progress;
+                              // messages arriving while paused never count, not
+                              // even retroactively once counting resumes
+  goalKeywords: '',           // comma-separated; a message must contain one of
+                              // these to count ('' = every message counts)
   goalText: '🎉 Goal reached! We burned it all down. 🔥',
+  // --- Desktop / mobile notifications ---
+  notifyEnabled: false,       // master switch (also needs OS/browser permission)
+  notifyMinAmount: 0,         // only notify for burns >= this many h173k (0 = all)
+  notifyOnlyWhenHidden: true, // stay quiet while the user is looking at the chat
 }
 
 export const BALANCE_REFRESH_MIN = 0    // 0 = manual refresh only
@@ -134,6 +143,7 @@ export const BALANCE_REFRESH_MAX = 3600 // 1 hour
 export const GOAL_TITLE_MAX = 80
 export const GOAL_TITLE_SIZE_MIN = 11
 export const GOAL_TITLE_SIZE_MAX = 32
+export const GOAL_KEYWORDS_MAX = 240
 
 export const TICKER_SIZE_MIN = 10
 export const TICKER_SIZE_MAX = 32

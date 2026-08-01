@@ -116,3 +116,27 @@ export function timeAgo(blockTime) {
   if (diff < 86400) return `${Math.floor(diff / 3600)}h`
   return `${Math.floor(diff / 86400)}d`
 }
+
+/**
+ * Parse the goal keyword field into a normalised list.
+ * Comma-separated, trimmed, lower-cased, blanks dropped.
+ */
+export function parseGoalKeywords(raw) {
+  return String(raw || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+}
+
+/**
+ * Does this message qualify for the burn goal?
+ * With no keywords configured every message counts (the original behaviour).
+ * Otherwise the message text must contain at least one keyword, matched
+ * case-insensitively as a substring so "burn" also matches "burning".
+ */
+export function messageMatchesGoal(message, keywords) {
+  if (!keywords || keywords.length === 0) return true
+  const text = String(message?.text || '').toLowerCase()
+  if (!text) return false
+  return keywords.some(k => text.includes(k))
+}

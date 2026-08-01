@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import {
+  notificationsSupported, notificationPermission,
+  requestNotificationPermission, showNotification,
+} from './notify'
+import {
   getRpcEndpoint, saveRpcEndpoint, validateRpcEndpoint, DEFAULT_RPC_ENDPOINT,
   getBurnAddress, saveBurnAddress, DEFAULT_BURN_ADDRESS,
   getDraftAmount, saveDraftAmount,
@@ -32,6 +36,7 @@ import { useTokenPrice, formatLastUpdated } from './usePrice'
 import {
   formatH173K, formatUSD, formatNumber, truncateAddress,
   byteLength, charLength, truncateToBytes, truncateToChars, timeAgo,
+  parseGoalKeywords, messageMatchesGoal,
 } from './utils'
 import { QRCodeGenerator } from './components/QRCode'
 
@@ -687,7 +692,14 @@ function Main({ connection, onRpcChange, onLock }) {
   // kept in localStorage so it survives restarts.
   useEffect(() => {
     if (chat.loading) return
-    if (!settings.goalEnabled) return // only count while the goal is active
+    // A switched-off goal and a paused goal both freeze the total; the only
+    // difference is that a switched-off goal is also hidden in the chat.
+    // Crucially the effect still runs while frozen, so incoming messages are
+    // absorbed (marked as seen without being added). Returning early here
+    // would leave them unseen and back-fill the whole backlog the moment the
+    // goal was switched on again.
+    const frozen = !settings.goalEnabled || !!settings.goalPaused
+    const keywords = parseGoalKeywords(settings.goalKeywords)
     const prev = goalProgressRef.current
     let burned = prev.burned
     let reached = prev.reached
@@ -705,8 +717,14 @@ function Main({ connection, onRpcChange, onLock }) {
     } else {
       for (const m of allMessages) {
         if (!countedRef.current.has(m.signature)) {
+          // Mark as seen FIRST, always. While the goal is frozen (paused or
+          // switched off) this is the whole point: those messages get absorbed
+          // here, so resuming does not retroactively add the backlog. The same
+          // applies to messages rejected by the keyword filter.
           countedRef.current.add(m.signature)
-          burned += (m.amount > 0 ? m.amount : 0)
+          if (!frozen && m.amount > 0 && messageMatchesGoal(m, keywords)) {
+            burned += m.amount
+          }
           changed = true
         }
       }
@@ -718,7 +736,7 @@ function Main({ connection, onRpcChange, onLock }) {
       }
     }
     let popup = false
-    if (settings.goalTarget > 0 && burned >= settings.goalTarget && !reached) {
+    if (!frozen && settings.goalTarget > 0 && burned >= settings.goalTarget && !reached) {
       reached = true
       popup = true
       changed = true
@@ -732,7 +750,52 @@ function Main({ connection, onRpcChange, onLock }) {
       saveGoalProgress(next)
     }
     if (popup) setGoalFxOpen(true)
-  }, [allMessages, chat.loading, settings.goalEnabled, settings.goalTarget])
+  }, [allMessages, chat.loading, settings.goalEnabled, settings.goalTarget,
+      settings.goalPaused, settings.goalKeywords])
+
+  // --- Incoming-burn notifications ---
+  // Baseline on the first pass so opening the app never dumps the existing
+  // backlog into the notification tray; only genuinely new messages notify.
+  const notifiedRef = useRef(null)
+  useEffect(() => {
+    if (chat.loading) return
+    if (notifiedRef.current === null) {
+      notifiedRef.current = new Set(allMessages.map(m => m.signature))
+      return
+    }
+    const fresh = allMessages.filter(m => !notifiedRef.current.has(m.signature))
+    for (const m of fresh) notifiedRef.current.add(m.signature)
+    if (notifiedRef.current.size > 800) {
+      notifiedRef.current = new Set(capList([...notifiedRef.current]))
+    }
+    if (!settings.notifyEnabled || notificationPermission() !== 'granted') return
+    if (settings.notifyOnlyWhenHidden && typeof document !== 'undefined' && !document.hidden) return
+
+    const mine = pubkey ? pubkey.toString() : null
+    const min = Number(settings.notifyMinAmount) || 0
+    const worth = fresh.filter(m =>
+      m.sender !== mine && m.amount > 0 && m.amount >= min
+    )
+    if (worth.length === 0) return
+
+    if (worth.length === 1) {
+      const m = worth[0]
+      showNotification(`${m.nick || 'anon'} burned ${formatH173K(m.amount)} ${TOKEN_TICKER}`, {
+        body: m.text || '(no text)',
+        tag: 'burnchat-msg',
+        onClick: () => setView('chat'),
+      })
+    } else {
+      // Collapse a burst into one line rather than firing N notifications.
+      const total = worth.reduce((s, m) => s + m.amount, 0)
+      showNotification(`${worth.length} new burns`, {
+        body: `${formatH173K(total)} ${TOKEN_TICKER} burned`,
+        tag: 'burnchat-msg',
+        onClick: () => setView('chat'),
+      })
+    }
+  }, [allMessages, chat.loading, pubkey, settings.notifyEnabled,
+      settings.notifyMinAmount, settings.notifyOnlyWhenHidden])
 
   const resetGoal = useCallback(() => {
     resetGoalProgress()
@@ -1242,6 +1305,7 @@ function GoalBar({ settings, burned, displayAmount }) {
         <span className="goal-bar-title" style={{ fontSize: titleSize }}>
           <span className="goal-bar-title-ic">{Icon.fire}</span>
           <span className="goal-bar-title-text">{title}</span>
+          {settings.goalPaused && <span className="goal-bar-paused">paused</span>}
         </span>
         <span className="goal-bar-pct">{reached ? '100' : pct.toFixed(pct < 10 ? 2 : 1)}%</span>
       </div>
@@ -1334,6 +1398,78 @@ function BurnFx({ message, settings, price, onClose }) {
 }
 
 /* ---------------- Settings ---------------- */
+
+/**
+ * Notification controls. Permission is requested from the toggle itself,
+ * because browsers only grant the prompt in response to a user gesture.
+ */
+function NotificationSettings({ settings, updateSettings }) {
+  const [perm, setPerm] = useState(notificationPermission)
+  const supported = notificationsSupported()
+
+  const toggle = async (want) => {
+    if (!want) { updateSettings({ notifyEnabled: false }); return }
+    let p = notificationPermission()
+    if (p === 'default') p = await requestNotificationPermission()
+    setPerm(p)
+    // Only arm the switch if permission actually came through, so the UI never
+    // claims notifications are on while the browser is silently blocking them.
+    updateSettings({ notifyEnabled: p === 'granted' })
+  }
+
+  if (!supported) {
+    return (
+      <span className="form-hint">
+        This browser doesn't support notifications. On iOS they only work after the app has
+        been added to the home screen.
+      </span>
+    )
+  }
+
+  return (
+    <>
+      <ToggleRow label="Notify me about new burns"
+        checked={!!settings.notifyEnabled && perm === 'granted'}
+        onChange={toggle} />
+      {perm === 'denied' && (
+        <span className="form-hint warn">
+          Notifications are blocked for this site. Re-enable them in your browser's site
+          settings, then switch this back on.
+        </span>
+      )}
+      <span className="form-hint">
+        Alerts fire while the app is running, including when it sits in the background.
+        Waking a fully closed app isn't possible here — that needs a push server.
+      </span>
+      {settings.notifyEnabled && perm === 'granted' && (
+        <>
+          <ToggleRow label="Only when the app isn't in view"
+            checked={!!settings.notifyOnlyWhenHidden}
+            onChange={v => updateSettings({ notifyOnlyWhenHidden: v })} />
+          <div className="form-group">
+            <label className="form-label">Only notify for burns of at least (h173k)</label>
+            <input className="form-input" type="number" min="0" step="any"
+              placeholder="0 = every burn"
+              value={settings.notifyMinAmount || ''}
+              onChange={e => updateSettings({
+                notifyMinAmount: Math.max(0, parseFloat(e.target.value || '0'))
+              })} />
+            <span className="form-hint">
+              Your own burns never notify. A burst of messages is collapsed into a single alert.
+            </span>
+          </div>
+          <button className="convert-sol-btn"
+            onClick={() => showNotification('Burn Chat', {
+              body: 'Notifications are working.', tag: 'burnchat-test',
+            })}>
+            Send a test notification
+          </button>
+        </>
+      )}
+    </>
+  )
+}
+
 function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalBurned, onResetGoal, wallet }) {
   const [nick, setNick] = useState(settings.nickname)
   const [addr, setAddr] = useState(burnAddress)
@@ -1555,7 +1691,7 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         <h3>Burn goal</h3>
         <ToggleRow label="Show burn-goal progress bar" checked={settings.goalEnabled}
           onChange={v => updateSettings({ goalEnabled: v })} />
-        <span className="form-hint">Counting starts when you enable the goal — burns already in the chat don't count. The total is kept between app restarts.</span>
+        <span className="form-hint">Counting starts when you enable the goal — burns already in the chat don't count. The total is kept between app restarts. Switching the goal off hides the bar and freezes the total; burns that land while it's off are skipped for good, exactly like pausing.</span>
         <div className="form-group">
           <label className="form-label">Goal title (shown on the bar in chat)</label>
           <input className="form-input" type="text" maxLength={GOAL_TITLE_MAX}
@@ -1590,6 +1726,25 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
           <label className="form-label">Message shown when the goal is reached</label>
           <textarea className="form-input" rows={2} value={settings.goalText}
             onChange={e => updateSettings({ goalText: e.target.value.slice(0, 280) })} />
+        </div>
+        <ToggleRow label="Pause counting (keeps the current total)"
+          checked={!!settings.goalPaused} onChange={v => updateSettings({ goalPaused: v })} />
+        <span className="form-hint">
+          Freezes the goal without clearing it. Burns that arrive while paused are skipped for
+          good — resuming will not add them retroactively. The target, the title and the total
+          counted so far all stay untouched.
+        </span>
+        <div className="form-group">
+          <label className="form-label">Keywords required to count (optional)</label>
+          <input className="form-input" type="text"
+            placeholder="e.g. #goal, road to 10m, charity"
+            value={settings.goalKeywords || ''}
+            onChange={e => updateSettings({ goalKeywords: e.target.value.slice(0, 200) })} />
+          <span className="form-hint">
+            Comma-separated. A burn only counts toward the goal if its message contains at least
+            one of these, matched anywhere in the text and ignoring capitalisation. Leave empty
+            to count every burn. Burns that don't match still appear in the chat as normal.
+          </span>
         </div>
         <div className="form-group">
           <label className="form-label">
@@ -1684,6 +1839,9 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
 
       {/* Network */}
       <div className="settings-section">
+        <h3>Notifications</h3>
+        <NotificationSettings settings={settings} updateSettings={updateSettings} />
+
         <h3>Network (RPC)</h3>
         <div className="form-group">
           <label className="form-label">RPC endpoint</label>
