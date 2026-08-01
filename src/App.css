@@ -3421,7 +3421,7 @@ input[type="range"]::-moz-range-thumb {
    by the person holding the phone. */
 .fx-notice {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   gap: 8px;
   margin: 0 0 12px;
@@ -3434,7 +3434,19 @@ input[type="range"]::-moz-range-thumb {
   line-height: 1.35;
   text-align: center;
 }
-.fx-notice-ic { flex: 0 0 auto; display: inline-flex; }
+.fx-notice-ic { flex: 0 0 auto; display: inline-flex; margin-top: 1px; }
 .fx-notice-ic svg { width: 15px; height: 15px; display: block; }
+/* Two stacked statements: the visibility floor, then the effect threshold. */
+.fx-notice-lines { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .fx-notice-text { min-width: 0; overflow-wrap: anywhere; }
+/* The effect line is secondary to "can I be seen at all". */
+.fx-notice-sub { font-size: 12px; opacity: 0.82; }
 .fx-notice strong { color: #ffae42; font-weight: var(--font-bold); }
+
+/* Warning variant of the small hint text under a setting — used when two
+   settings contradict each other, or when the browser is blocking something. */
+.form-hint.warn {
+  color: #ffb057;
+  border-left: 2px solid rgba(255, 140, 40, 0.55);
+  padding-left: 8px;
+}

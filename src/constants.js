@@ -117,8 +117,9 @@ export const DEFAULT_CHAT_SETTINGS = {
   watchOnly: false,           // watch-only mode: hide controls, show only the chat
                               // (toggled from the header eye button, not from Settings)
   fxReplayOnTap: true,        // tapping a big-burn message replays its effect
-  fxNoticeEnabled: true,      // show "burn X to get on screen" above the chat, so
-                              // people watching an observer's screen know the bar
+  thresholdNoticeEnabled: true, // show the "how much do I need to burn" notice above
+                                // the chat: the visibility floor (minBurnFilter) and,
+                                // separately, the big-burn effect threshold
   balanceRefreshSec: 20,      // how often balances are refreshed (0 = manual only)
   // --- Burn goal (community burn target) ---
   goalEnabled: false,         // show the goal progress bar + fire the goal effect
@@ -135,6 +136,28 @@ export const DEFAULT_CHAT_SETTINGS = {
   notifyEnabled: false,       // master switch (also needs OS/browser permission)
   notifyMinAmount: 0,         // only notify for burns >= this many h173k (0 = all)
   notifyOnlyWhenHidden: true, // stay quiet while the user is looking at the chat
+}
+
+// The visibility floor must always sit strictly BELOW the effect threshold.
+// Otherwise a burn could trigger the full-screen effect while being filtered
+// out of the list, which looks like a bug. The gap is one whole token where
+// the threshold is large enough for that to be meaningful, and one raw unit
+// otherwise, so the clamped value stays a round, readable number.
+export function thresholdGap(reference) {
+  return reference >= 1 ? 1 : 1 / Math.pow(10, TOKEN_DECIMALS)
+}
+
+/** Highest visibility floor allowed for a given effect threshold. */
+export function maxVisibilityFloor(fxThreshold, fxEnabled) {
+  if (!fxEnabled || !(fxThreshold > 0)) return Infinity
+  return Math.max(0, fxThreshold - thresholdGap(fxThreshold))
+}
+
+/** Lowest effect threshold allowed for a given visibility floor. */
+export function minEffectThreshold(minBurnFilter) {
+  const floor = Number(minBurnFilter) || 0
+  if (floor <= 0) return 0
+  return floor + thresholdGap(floor)
 }
 
 export const BALANCE_REFRESH_MIN = 0    // 0 = manual refresh only
@@ -161,15 +184,31 @@ export const FX_VPOS_MAX = 100
 export const FX_DIM_MIN = 0
 export const FX_DIM_MAX = 100
 
+/**
+ * Enforce "visibility floor < effect threshold" on a settings object.
+ * Applied on both load and save, so the invariant holds no matter how the
+ * value got there — a legacy config written before this rule existed, a
+ * hand-edited localStorage entry, or a future code path that forgets to clamp.
+ * The effect threshold is treated as the authority and the floor gives way,
+ * because the floor is the cheaper thing to be wrong about.
+ */
+export function enforceThresholdOrder(s) {
+  const fxOn = !!s.fxEnabled && Number(s.fxThreshold) > 0
+  if (!fxOn) return s
+  const cap = maxVisibilityFloor(s.fxThreshold, true)
+  if (Number(s.minBurnFilter) > cap) return { ...s, minBurnFilter: cap }
+  return s
+}
+
 export function getChatSettings() {
   try {
     const stored = localStorage.getItem(CHAT_SETTINGS_KEY)
     if (!stored) return { ...DEFAULT_CHAT_SETTINGS }
-    return { ...DEFAULT_CHAT_SETTINGS, ...JSON.parse(stored) }
+    return enforceThresholdOrder({ ...DEFAULT_CHAT_SETTINGS, ...JSON.parse(stored) })
   } catch { return { ...DEFAULT_CHAT_SETTINGS } }
 }
 export function saveChatSettings(s) {
-  try { localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(s)); return true } catch { return false }
+  try { localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(enforceThresholdOrder(s))); return true } catch { return false }
 }
 
 // ========== BURN GOAL PROGRESS (req: cumulative across runs) ==========

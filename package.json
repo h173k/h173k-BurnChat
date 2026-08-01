@@ -1,6 +1,6 @@
 {
   "name": "h173k-burn-chat",
-  "version": "1.6.0",
+  "version": "1.8.0",
   "description": "h173k Burn Chat - burn $H173k tokens with on-chain messages",
   "type": "module",
   "scripts": {

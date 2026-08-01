@@ -20,6 +20,7 @@ import {
   FX_DIM_MIN, FX_DIM_MAX, TICKER_SIZE_MIN, TICKER_SIZE_MAX,
   MIN_TRIGGER_THRESHOLD, MIN_REPLENISH_TO, MIN_SWAP_PRIORITY_FEE,
   BALANCE_REFRESH_MIN, BALANCE_REFRESH_MAX, GOAL_TITLE_MAX,
+  maxVisibilityFloor, minEffectThreshold, enforceThresholdOrder,
   GOAL_TITLE_SIZE_MIN, GOAL_TITLE_SIZE_MAX, APP_VERSION, BUILD_TIME,
 } from './constants'
 import {
@@ -648,7 +649,14 @@ function Main({ connection, onRpcChange, onLock }) {
   }, [allMessages, settings.minBurnFilter, settings.sort])
 
   const updateSettings = useCallback((patch) => {
-    setSettings(prev => { const next = { ...prev, ...patch }; saveChatSettings(next); return next })
+    setSettings(prev => {
+      // Clamp here too, not just in storage, so React state and localStorage
+      // can never disagree — e.g. switching the effect on while an old, too
+      // high visibility floor is set brings the floor down immediately.
+      const next = enforceThresholdOrder({ ...prev, ...patch })
+      saveChatSettings(next)
+      return next
+    })
   }, [])
 
   // --- Big-burn celebration (persists across runs) ---
@@ -985,7 +993,7 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
 
       <GoalBar settings={settings} burned={goalBurned} displayAmount={displayAmount} />
 
-      <FxThresholdNotice settings={settings} displayAmount={displayAmount} />
+      <ThresholdNotice settings={settings} displayAmount={displayAmount} />
 
       {showRpcBanner && (
         <div className="rpc-banner">
@@ -1294,22 +1302,40 @@ function DepositPrompt({ pubkey, onClose }) {
 
 /* ---------------- Special effect overlay (req 13) ---------------- */
 /**
- * Tells everyone what it takes to get a message on screen.
+ * Tells everyone what it takes to get a message seen.
  *
- * The threshold is a local setting, so a sender's own copy of the app can't
- * know what an observer has configured. This notice is therefore aimed at the
- * observer's display — the screen an audience is actually looking at — which
- * is why it stays visible in watch-only mode.
+ * Two independent thresholds, deliberately stated separately because they mean
+ * different things:
+ *   - minBurnFilter — below this the message is not rendered in the chat at all
+ *   - fxThreshold   — at or above this it additionally takes over the screen
+ *
+ * Both are local settings, so a sender's own copy of the app cannot know what
+ * an observer configured. The notice is aimed at the observer's display — the
+ * screen an audience is actually looking at — hence it stays visible in
+ * watch-only mode.
  */
-function FxThresholdNotice({ settings, displayAmount }) {
-  if (!settings.fxNoticeEnabled) return null
-  if (!settings.fxEnabled || !(settings.fxThreshold > 0)) return null
+function ThresholdNotice({ settings, displayAmount }) {
+  if (settings.thresholdNoticeEnabled === false) return null
+  const minBurn = Number(settings.minBurnFilter) || 0
+  const fxAmount = Number(settings.fxThreshold) || 0
+  const fxOn = !!settings.fxEnabled && fxAmount > 0
+  if (minBurn <= 0 && !fxOn) return null
   return (
     <div className="fx-notice">
       <span className="fx-notice-ic">{Icon.fire}</span>
-      <span className="fx-notice-text">
-        Burn <strong>{displayAmount(settings.fxThreshold)}</strong> or more to put your message on screen
-      </span>
+      <div className="fx-notice-lines">
+        {minBurn > 0 && (
+          <div className="fx-notice-text">
+            Burn <strong>{displayAmount(minBurn)}</strong> or more for your message to appear in the chat
+          </div>
+        )}
+        {fxOn && (
+          <div className={`fx-notice-text ${minBurn > 0 ? 'fx-notice-sub' : ''}`}>
+            Burn <strong>{displayAmount(fxAmount)}</strong> or more {minBurn > 0 ? 'to also' : 'to'} fill
+            the screen with the big-burn effect
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -1517,11 +1543,42 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
   // Local string buffer for the decimal filter so users can type "0." / "0,5"
   // without the parsed number snapping the field back mid-entry.
   const [minBurnStr, setMinBurnStr] = useState(settings.minBurnFilter ? String(settings.minBurnFilter) : '')
+  // The visibility floor is capped so it can never reach the effect threshold.
+  const minBurnCap = maxVisibilityFloor(settings.fxThreshold, settings.fxEnabled)
+  const [minBurnClamped, setMinBurnClamped] = useState(false)
   const onMinBurn = (raw) => {
     const v = sanitizeDecimal(raw)
     setMinBurnStr(v)
     const n = parseFloat(v)
-    updateSettings({ minBurnFilter: isNaN(n) ? 0 : Math.max(0, n) })
+    const wanted = isNaN(n) ? 0 : Math.max(0, n)
+    const capped = Math.min(wanted, minBurnCap)
+    setMinBurnClamped(capped < wanted)
+    updateSettings({ minBurnFilter: capped })
+  }
+  // Snap the text back to what was actually stored, so the field never keeps
+  // showing a number the app rejected.
+  const commitMinBurn = () => {
+    setMinBurnStr(settings.minBurnFilter ? String(settings.minBurnFilter) : '')
+    setMinBurnClamped(false)
+  }
+  // Effect threshold: the same rule enforced from the other side, so the floor
+  // can't be raised indirectly by dragging the effect threshold down onto it.
+  const [fxThresholdStr, setFxThresholdStr] = useState(String(settings.fxThreshold ?? 0))
+  const [fxClamped, setFxClamped] = useState(false)
+  const fxFloor = minEffectThreshold(settings.minBurnFilter)
+  const onFxThreshold = (raw) => {
+    const v = sanitizeDecimal(raw)
+    setFxThresholdStr(v)
+    const n = parseFloat(v)
+    const wanted = isNaN(n) ? 0 : Math.max(0, n)
+    // 0 is a legitimate value meaning "no effect", so it is never raised.
+    const floored = wanted > 0 ? Math.max(wanted, fxFloor) : 0
+    setFxClamped(floored > wanted)
+    updateSettings({ fxThreshold: floored })
+  }
+  const commitFxThreshold = () => {
+    setFxThresholdStr(String(settings.fxThreshold ?? 0))
+    setFxClamped(false)
   }
   // Balance refresh: local string buffer so the field can be cleared while
   // typing without the parsed value fighting the input.
@@ -1687,7 +1744,21 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         <div className="form-group">
           <label className="form-label">Only show burns ≥ (h173k)</label>
           <input className="form-input" type="text" inputMode="decimal" autoComplete="off" placeholder="0"
-            value={minBurnStr} onChange={e => onMinBurn(e.target.value)} />
+            value={minBurnStr}
+            onChange={e => onMinBurn(e.target.value)}
+            onBlur={commitMinBurn} />
+          <span className="form-hint">
+            Messages burning less than this are hidden from the chat entirely — this is the price of
+            being seen at all. 0 shows every burn. Filtering happens on your device, so it only
+            affects this screen.
+          </span>
+          {minBurnCap !== Infinity && (
+            <span className={`form-hint ${minBurnClamped ? 'warn' : ''}`}>
+              {minBurnClamped
+                ? `Capped at ${formatH173K(minBurnCap)} ${TOKEN_TICKER} — the visibility floor must stay below the big-burn effect threshold (${formatH173K(settings.fxThreshold)} ${TOKEN_TICKER}), or a burn could take over the screen without appearing in the list.`
+                : `Max ${formatH173K(minBurnCap)} ${TOKEN_TICKER} — always kept below the big-burn effect threshold (${formatH173K(settings.fxThreshold)} ${TOKEN_TICKER}).`}
+            </span>
+          )}
         </div>
         <div className="form-group">
           <label className="form-label">h173k decimals shown</label>
@@ -1789,17 +1860,28 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         <span className="form-hint">Tap any highlighted big burn in the chat to watch its effect again.</span>
         <div className="form-group">
           <label className="form-label">Trigger when burn ≥ (h173k)</label>
-          <input className="form-input" type="number" min="0" step="any" value={settings.fxThreshold}
-            onChange={e => updateSettings({ fxThreshold: Math.max(0, parseFloat(e.target.value || '0')) })} />
+          <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
+            value={fxThresholdStr}
+            onChange={e => onFxThreshold(e.target.value)}
+            onBlur={commitFxThreshold} />
           <span className="form-hint">Big burns also get a highlighted bubble in the chat with a larger amount.</span>
+          {fxFloor > 0 && (
+            <span className={`form-hint ${fxClamped ? 'warn' : ''}`}>
+              {fxClamped
+                ? `Raised to ${formatH173K(fxFloor)} ${TOKEN_TICKER} — this must stay above the visibility floor (${formatH173K(settings.minBurnFilter)} ${TOKEN_TICKER}) set under Chat display.`
+                : `Min ${formatH173K(fxFloor)} ${TOKEN_TICKER} — always kept above the visibility floor (${formatH173K(settings.minBurnFilter)} ${TOKEN_TICKER}).`}
+            </span>
+          )}
         </div>
-        <ToggleRow label="Show this threshold above the chat"
-          checked={settings.fxNoticeEnabled !== false}
-          onChange={v => updateSettings({ fxNoticeEnabled: v })} />
+        <ToggleRow label="Show the burn thresholds above the chat"
+          checked={settings.thresholdNoticeEnabled !== false}
+          onChange={v => updateSettings({ thresholdNoticeEnabled: v })} />
         <span className="form-hint">
-          Adds a line reading “Burn {formatH173K(settings.fxThreshold)} {TOKEN_TICKER} or more to put your
-          message on screen”. The threshold is stored locally, so a sender's own app can't know what you've
-          set — show this on the screen your audience is watching. It stays visible in watch-only mode.
+          Adds a notice stating what it costs to be seen: the amount needed for a message to appear
+          in the chat at all (“Only show burns ≥” under Chat display) and, separately, the amount
+          that triggers this effect. Both are stored on your device, so a sender's app can't know
+          what you set — show this on the screen your audience is watching. It stays visible in
+          watch-only mode.
         </span>
         <div className="form-group">
           <label className="form-label">Show effect for (seconds): {Number(settings.fxDuration).toFixed(1)}</label>
