@@ -106,8 +106,12 @@ export const DEFAULT_CHAT_SETTINGS = {
   fetchLimit: 50,             // how many recent messages to pull from API on load (req 11/18)
   minBurnFilter: 0,           // only show messages >= this burn (in h173k) (req 8)
   displayUnit: UNIT_H173K,    // h173k | usdt (req 14)
-  fxThreshold: 1000000,       // special effect for burns >= this many h173k (req 13)
-  fxEnabled: true,
+  // Thresholds default to "off". They are a broadcaster feature: a streamer
+  // decides what a message has to be worth to reach their audience. A regular
+  // user has no audience, so leaving these unset means every burn shows and
+  // nothing is gated. 0 = unset.
+  fxThreshold: 0,             // special effect for burns >= this many h173k (req 13)
+  fxEnabled: false,
   fxDuration: 6.5,            // seconds the big-burn effect stays on screen
   fxNickSize: 28,             // px font size of the nickname inside the big-burn effect
   fxTextSize: 16,             // px font size of the message text inside the big-burn effect
@@ -117,9 +121,10 @@ export const DEFAULT_CHAT_SETTINGS = {
   watchOnly: false,           // watch-only mode: hide controls, show only the chat
                               // (toggled from the header eye button, not from Settings)
   fxReplayOnTap: true,        // tapping a big-burn message replays its effect
-  thresholdNoticeEnabled: true, // show the "how much do I need to burn" notice above
-                                // the chat: the visibility floor (minBurnFilter) and,
-                                // separately, the big-burn effect threshold
+  // The notice only makes sense on a broadcaster's screen, and only once a
+  // threshold actually exists. It stays hidden until one is set (see
+  // ThresholdNotice, which also requires a non-zero threshold to render).
+  thresholdNoticeEnabled: false,
   balanceRefreshSec: 20,      // how often balances are refreshed (0 = manual only)
   // --- Burn goal (community burn target) ---
   goalEnabled: false,         // show the goal progress bar + fire the goal effect
@@ -184,6 +189,27 @@ export const FX_VPOS_MAX = 100
 export const FX_DIM_MIN = 0
 export const FX_DIM_MAX = 100
 
+// Bumped when a default changes in a way that stored settings must follow.
+// v2: thresholds became a broadcaster opt-in. Earlier builds shipped an
+// effect threshold of 1,000,000 h173k switched on for everyone, which — at a
+// few hundred dollars a token — told ordinary users they needed a fortune to
+// be seen. Anyone still carrying that untouched default is moved to "off".
+const SETTINGS_VERSION = 2
+const LEGACY_FX_THRESHOLD = 1000000
+
+function migrateChatSettings(s) {
+  if (s.settingsVersion >= SETTINGS_VERSION) return s
+  const next = { ...s, settingsVersion: SETTINGS_VERSION }
+  // Only touch the value if it is exactly the old shipped default. A streamer
+  // who deliberately chose a different number keeps it.
+  if (next.fxEnabled === true && Number(next.fxThreshold) === LEGACY_FX_THRESHOLD) {
+    next.fxEnabled = false
+    next.fxThreshold = 0
+    next.thresholdNoticeEnabled = false
+  }
+  return next
+}
+
 /**
  * Enforce "visibility floor < effect threshold" on a settings object.
  * Applied on both load and save, so the invariant holds no matter how the
@@ -203,9 +229,10 @@ export function enforceThresholdOrder(s) {
 export function getChatSettings() {
   try {
     const stored = localStorage.getItem(CHAT_SETTINGS_KEY)
-    if (!stored) return { ...DEFAULT_CHAT_SETTINGS }
-    return enforceThresholdOrder({ ...DEFAULT_CHAT_SETTINGS, ...JSON.parse(stored) })
-  } catch { return { ...DEFAULT_CHAT_SETTINGS } }
+    if (!stored) return { ...DEFAULT_CHAT_SETTINGS, settingsVersion: SETTINGS_VERSION }
+    const merged = migrateChatSettings({ ...DEFAULT_CHAT_SETTINGS, ...JSON.parse(stored) })
+    return enforceThresholdOrder(merged)
+  } catch { return { ...DEFAULT_CHAT_SETTINGS, settingsVersion: SETTINGS_VERSION } }
 }
 export function saveChatSettings(s) {
   try { localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(enforceThresholdOrder(s))); return true } catch { return false }

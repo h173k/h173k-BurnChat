@@ -1315,7 +1315,7 @@ function DepositPrompt({ pubkey, onClose }) {
  * watch-only mode.
  */
 function ThresholdNotice({ settings, displayAmount }) {
-  if (settings.thresholdNoticeEnabled === false) return null
+  if (settings.thresholdNoticeEnabled !== true) return null
   const minBurn = Number(settings.minBurnFilter) || 0
   const fxAmount = Number(settings.fxThreshold) || 0
   const fxOn = !!settings.fxEnabled && fxAmount > 0
@@ -1853,28 +1853,40 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
       {/* Special effect */}
       <div className="settings-section">
         <h3>Big-burn effect</h3>
+        <span className="form-hint">
+          A broadcaster feature: set a price for taking over the screen. Off by default — with it
+          off, every burn is shown the same way and nothing is gated.
+        </span>
         <ToggleRow label="Enable animated effect" checked={settings.fxEnabled} onChange={v => updateSettings({ fxEnabled: v })} />
-        <ToggleRow label="Replay the effect when tapping a big-burn message"
-          checked={settings.fxReplayOnTap !== false}
-          onChange={v => updateSettings({ fxReplayOnTap: v })} />
-        <span className="form-hint">Tap any highlighted big burn in the chat to watch its effect again.</span>
-        <div className="form-group">
-          <label className="form-label">Trigger when burn ≥ (h173k)</label>
-          <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
-            value={fxThresholdStr}
-            onChange={e => onFxThreshold(e.target.value)}
-            onBlur={commitFxThreshold} />
-          <span className="form-hint">Big burns also get a highlighted bubble in the chat with a larger amount.</span>
-          {fxFloor > 0 && (
-            <span className={`form-hint ${fxClamped ? 'warn' : ''}`}>
-              {fxClamped
-                ? `Raised to ${formatH173K(fxFloor)} ${TOKEN_TICKER} — this must stay above the visibility floor (${formatH173K(settings.minBurnFilter)} ${TOKEN_TICKER}) set under Chat display.`
-                : `Min ${formatH173K(fxFloor)} ${TOKEN_TICKER} — always kept above the visibility floor (${formatH173K(settings.minBurnFilter)} ${TOKEN_TICKER}).`}
-            </span>
-          )}
-        </div>
+        {settings.fxEnabled && (
+          <>
+            <ToggleRow label="Replay the effect when tapping a big-burn message"
+              checked={settings.fxReplayOnTap !== false}
+              onChange={v => updateSettings({ fxReplayOnTap: v })} />
+            <span className="form-hint">Tap any highlighted big burn in the chat to watch its effect again.</span>
+            <div className="form-group">
+              <label className="form-label">Trigger when burn ≥ (h173k)</label>
+              <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
+                placeholder="0 = no effect"
+                value={fxThresholdStr}
+                onChange={e => onFxThreshold(e.target.value)}
+                onBlur={commitFxThreshold} />
+              <span className="form-hint">
+                Big burns also get a highlighted bubble in the chat with a larger amount.
+                Leave at 0 and nothing triggers.
+              </span>
+              {fxFloor > 0 && (
+                <span className={`form-hint ${fxClamped ? 'warn' : ''}`}>
+                  {fxClamped
+                    ? `Raised to ${formatH173K(fxFloor)} ${TOKEN_TICKER} — this must stay above the visibility floor (${formatH173K(settings.minBurnFilter)} ${TOKEN_TICKER}) set under Chat display.`
+                    : `Min ${formatH173K(fxFloor)} ${TOKEN_TICKER} — always kept above the visibility floor (${formatH173K(settings.minBurnFilter)} ${TOKEN_TICKER}).`}
+                </span>
+              )}
+            </div>
+          </>
+        )}
         <ToggleRow label="Show the burn thresholds above the chat"
-          checked={settings.thresholdNoticeEnabled !== false}
+          checked={settings.thresholdNoticeEnabled === true}
           onChange={v => updateSettings({ thresholdNoticeEnabled: v })} />
         <span className="form-hint">
           Adds a notice stating what it costs to be seen: the amount needed for a message to appear
