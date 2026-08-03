@@ -13,6 +13,7 @@ import {
   getFxState, saveFxState, capList,
   getReplenishSettings, saveReplenishSettings, getReplenishEnabled, saveReplenishEnabled,
   getH173KDecimals, saveH173KDecimals,
+  getModeration, banSender, unbanSender, hideMessage, unhideMessage, clearModeration,
   TOKEN_TICKER, TOKEN_SYMBOL, MAX_TEXT_CHARS, MAX_MEMO_BYTES, MEMO_SEP,
   SORT_NEWEST, SORT_LARGEST, UNIT_H173K, UNIT_USDT,
   FX_NICK_SIZE_MIN, FX_NICK_SIZE_MAX, FX_DURATION_MIN, FX_DURATION_MAX,
@@ -596,6 +597,7 @@ function Main({ connection, onRpcChange, onLock }) {
   const [view, setView] = useState('chat') // chat | settings
   const [showReceive, setShowReceive] = useState(false)
   const [settings, setSettings] = useState(getChatSettings())
+  const [moderation, setModeration] = useState(getModeration)
   const [burnAddress, setBurnAddress] = useState(getBurnAddress())
   const [fxMessage, setFxMessage] = useState(null)
   const [goalFxOpen, setGoalFxOpen] = useState(false)
@@ -642,11 +644,17 @@ function Main({ connection, onRpcChange, onLock }) {
 
   // filter + sort (req 8, 10)
   const visible = useMemo(() => {
-    let arr = allMessages.filter(m => m.amount >= (settings.minBurnFilter || 0))
+    const bannedSet = new Set(moderation.banned)
+    const hiddenSet = new Set(moderation.hidden)
+    let arr = allMessages.filter(m =>
+      m.amount >= (settings.minBurnFilter || 0) &&
+      !bannedSet.has(m.sender) &&
+      !hiddenSet.has(m.signature)
+    )
     if (settings.sort === SORT_LARGEST) arr = arr.slice().sort((a, b) => b.amount - a.amount || b.blockTime - a.blockTime)
     else arr = arr.slice().sort((a, b) => b.blockTime - a.blockTime)
     return arr
-  }, [allMessages, settings.minBurnFilter, settings.sort])
+  }, [allMessages, settings.minBurnFilter, settings.sort, moderation])
 
   const updateSettings = useCallback((patch) => {
     setSettings(prev => {
@@ -679,6 +687,11 @@ function Main({ connection, onRpcChange, onLock }) {
       return
     }
     if (!settings.fxEnabled || !(settings.fxThreshold > 0)) return
+    // Moderated messages must never take over the stream — that is the whole
+    // point of blocking someone. They are still marked as celebrated below, so
+    // unblocking later doesn't cause a burst of old effects to fire.
+    const bannedSet = new Set(moderation.banned)
+    const hiddenSet = new Set(moderation.hidden)
     const fresh = allMessages.filter(
       m => m.amount >= settings.fxThreshold && !celebratedRef.current.has(m.signature)
     )
@@ -688,9 +701,11 @@ function Main({ connection, onRpcChange, onLock }) {
     celebratedRef.current = new Set(capped)
     saveFxState({ baseline: true, sigs: capped })
     // Celebrate the biggest newly-seen big burn (avoids a queue of popups).
-    const big = fresh.slice().sort((a, b) => b.amount - a.amount)[0]
+    const showable = fresh.filter(m => !bannedSet.has(m.sender) && !hiddenSet.has(m.signature))
+    if (!showable.length) return
+    const big = showable.slice().sort((a, b) => b.amount - a.amount)[0]
     setFxMessage(big)
-  }, [allMessages, chat.loading, settings.fxEnabled, settings.fxThreshold])
+  }, [allMessages, chat.loading, settings.fxEnabled, settings.fxThreshold, moderation])
 
   // --- Burn goal accumulation (persists across runs) ---
   // Counting starts the moment the goal is enabled: the burns already in the
@@ -820,6 +835,30 @@ function Main({ connection, onRpcChange, onLock }) {
     setToast({ msg, kind }); setTimeout(() => setToast(null), 4000)
   }, [])
 
+  // --- Moderation actions (local display only; nothing is removed on-chain) ---
+  const onHideMessage = useCallback((m) => {
+    setModeration(hideMessage(m.signature))
+    showToast('Message hidden')
+  }, [])
+
+  const onBanSender = useCallback((m) => {
+    setModeration(banSender(m.sender))
+    showToast(`Blocked ${truncateAddress(m.sender)}`)
+  }, [])
+
+  const onUnbanSender = useCallback((address) => {
+    setModeration(unbanSender(address))
+  }, [])
+
+  const onUnhideMessage = useCallback((signature) => {
+    setModeration(unhideMessage(signature))
+  }, [])
+
+  const onClearModeration = useCallback(() => {
+    setModeration(clearModeration())
+    showToast('Moderation list cleared')
+  }, [])
+
   // Replay a big burn's celebration on demand (tapping the message). Purely a
   // display action — it doesn't touch the "already celebrated" bookkeeping, so
   // automatic effects keep firing exactly once as before.
@@ -918,6 +957,8 @@ function Main({ connection, onRpcChange, onLock }) {
           pubkey={pubkey} h173kDecimals={getH173KDecimals()}
           goalBurned={goalProgress.burned} onResetGoal={resetGoal}
           wallet={wallet}
+          moderation={moderation} onUnbanSender={onUnbanSender}
+          onUnhideMessage={onUnhideMessage} onClearModeration={onClearModeration}
         />
       ) : (
         <ChatView
@@ -932,6 +973,7 @@ function Main({ connection, onRpcChange, onLock }) {
           draftText={draftText} setDraftText={setDraftText}
           draftAmount={draftAmount} setDraftAmount={setDraftAmount}
           onReplayFx={replayFx}
+          onHideMessage={onHideMessage} onBanSender={onBanSender}
         />
       )}
 
@@ -956,7 +998,7 @@ function PriceTag({ price, tickerSize }) {
 }
 
 /* ---------------- Chat ---------------- */
-function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalBurned, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount, onReplayFx }) {
+function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalBurned, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount, onReplayFx, onHideMessage, onBanSender }) {
   const displayAmount = useCallback((amt) => {
     if (settings.displayUnit === UNIT_USDT && price.price != null) return formatUSD(amt * price.price)
     return `${formatH173K(amt)} ${TOKEN_TICKER}`
@@ -1028,7 +1070,8 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
             <MessageRow key={m.signature} m={m} displayAmount={displayAmount}
               mine={pubkey && m.sender === pubkey.toString()}
               big={big}
-              onReplay={big && settings.fxReplayOnTap !== false ? onReplayFx : null} />
+              onReplay={big && settings.fxReplayOnTap !== false ? onReplayFx : null}
+              onHide={onHideMessage} onBan={onBanSender} />
           )
         })}
       </div>
@@ -1042,18 +1085,22 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
   )
 }
 
-function MessageRow({ m, displayAmount, mine, big, onReplay }) {
+function MessageRow({ m, displayAmount, mine, big, onReplay, onHide, onBan }) {
   const sig = m.signature
   const explorer = `https://solscan.io/tx/${sig}`
-  // Tapping a big burn replays its effect (opt-in setting). The tx link and any
-  // selected text are excluded so copying a message still works normally.
+  const [menuOpen, setMenuOpen] = useState(false)
+  const canModerate = !!(onHide || onBan)
+  // Tapping a big burn replays its effect (opt-in setting). The tx link, the
+  // moderation menu and any selected text are excluded so copying a message
+  // and moderating it still work normally.
   const handleClick = onReplay
     ? (e) => {
-        if (e.target.closest('a')) return
+        if (e.target.closest('a') || e.target.closest('.msg-mod')) return
         if (window.getSelection && String(window.getSelection()).length) return
         onReplay(m)
       }
     : undefined
+  const act = (fn) => (e) => { e.stopPropagation(); setMenuOpen(false); fn(m) }
   return (
     <div className={`msg ${mine ? 'mine' : ''} ${big ? 'msg-big' : ''} ${onReplay ? 'msg-replay' : ''}`}
       onClick={handleClick}
@@ -1066,6 +1113,34 @@ function MessageRow({ m, displayAmount, mine, big, onReplay }) {
         {big && <span className="msg-big-badge">{Icon.fire} BIG BURN</span>}
         <span className="msg-from">{truncateAddress(m.sender)}</span>
         <span className="msg-time">{timeAgo(m.blockTime)}</span>
+        {canModerate && (
+          <span className="msg-mod">
+            <button className="msg-mod-btn"
+              onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o) }}
+              aria-label="Moderate this message"
+              aria-expanded={menuOpen}
+              title="Moderate">{Icon.dots}</button>
+            {menuOpen && (
+              <>
+                {/* Click-catcher so tapping anywhere closes the menu. */}
+                <span className="msg-mod-scrim" onClick={(e) => { e.stopPropagation(); setMenuOpen(false) }} />
+                <span className="msg-mod-menu" role="menu">
+                  {onHide && (
+                    <button className="msg-mod-item" role="menuitem" onClick={act(onHide)}>
+                      Hide this message
+                    </button>
+                  )}
+                  {onBan && !mine && (
+                    <button className="msg-mod-item danger" role="menuitem" onClick={act(onBan)}>
+                      Block {truncateAddress(m.sender)}
+                    </button>
+                  )}
+                  <span className="msg-mod-note">Hides it on this screen only — the burn stays on-chain.</span>
+                </span>
+              </>
+            )}
+          </span>
+        )}
       </div>
       {/* text is rendered as a plain text node => no HTML/JS can execute (req 20) */}
       <div className="msg-text">{m.text || <span className="dim">(no text)</span>}</div>
@@ -1446,6 +1521,56 @@ function BurnFx({ message, settings, price, onClose }) {
   )
 }
 
+/**
+ * Review and undo local moderation.
+ * Nothing here touches the chain — these lists only decide what this device
+ * renders, which for a broadcaster is the screen going out on stream.
+ */
+function ModerationSettings({ moderation, onUnban, onUnhide, onClear }) {
+  const banned = moderation?.banned || []
+  const hidden = moderation?.hidden || []
+  const empty = banned.length === 0 && hidden.length === 0
+  return (
+    <>
+      <span className="form-hint">
+        Use the ⋮ menu on any message to hide it or block its sender. This filters your own
+        screen only — the burn stays on Solana and everyone else still sees it.
+      </span>
+      {empty && <span className="form-hint">Nothing is blocked or hidden.</span>}
+      {banned.length > 0 && (
+        <div className="form-group">
+          <label className="form-label">Blocked senders ({banned.length})</label>
+          <div className="mod-list">
+            {banned.map(a => (
+              <div className="mod-row" key={a}>
+                <span className="mod-addr" title={a}>{truncateAddress(a, 8, 8)}</span>
+                <button className="mod-undo" onClick={() => onUnban(a)}>Unblock</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {hidden.length > 0 && (
+        <div className="form-group">
+          <label className="form-label">Hidden messages ({hidden.length})</label>
+          <div className="mod-list">
+            {hidden.map(sig => (
+              <div className="mod-row" key={sig}>
+                <a className="mod-addr" href={`https://solscan.io/tx/${sig}`}
+                  target="_blank" rel="noreferrer noopener" title={sig}>{truncateAddress(sig, 8, 8)}</a>
+                <button className="mod-undo" onClick={() => onUnhide(sig)}>Restore</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {!empty && (
+        <button className="convert-sol-btn" onClick={onClear}>Clear the whole list</button>
+      )}
+    </>
+  )
+}
+
 /* ---------------- Settings ---------------- */
 
 /**
@@ -1519,7 +1644,7 @@ function NotificationSettings({ settings, updateSettings }) {
   )
 }
 
-function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalBurned, onResetGoal, wallet }) {
+function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalBurned, onResetGoal, wallet, moderation, onUnbanSender, onUnhideMessage, onClearModeration }) {
   const [nick, setNick] = useState(settings.nickname)
   const [addr, setAddr] = useState(burnAddress)
   const [addrErr, setAddrErr] = useState('')
@@ -1964,6 +2089,10 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
 
       {/* Network */}
       <div className="settings-section">
+        <h3>Moderation</h3>
+        <ModerationSettings moderation={moderation} onUnban={onUnbanSender}
+          onUnhide={onUnhideMessage} onClear={onClearModeration} />
+
         <h3>Notifications</h3>
         <NotificationSettings settings={settings} updateSettings={updateSettings} />
 

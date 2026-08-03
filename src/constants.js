@@ -343,6 +343,74 @@ export function saveReplenishSettings(s) {
 }
 
 // ========== H173K DISPLAY DECIMALS ==========
+// ========== MODERATION (local) ==========
+// Important limitation: burns are on-chain transfers with memos. Nothing here
+// deletes anything from Solana — the transaction stays public and visible in
+// any explorer, and other people's copies of the app are unaffected. This is a
+// local display filter for the broadcaster's own screen, which is the one going
+// out on stream. Treated as moderation of the *broadcast*, not of the chain.
+const MODERATION_KEY = 'h173kbc_moderation'
+const MODERATION_CAP = 2000
+
+export function getModeration() {
+  try {
+    const stored = localStorage.getItem(MODERATION_KEY)
+    if (!stored) return { banned: [], hidden: [] }
+    const m = JSON.parse(stored)
+    return {
+      banned: Array.isArray(m.banned) ? m.banned : [],
+      hidden: Array.isArray(m.hidden) ? m.hidden : [],
+    }
+  } catch { return { banned: [], hidden: [] } }
+}
+
+export function saveModeration(m) {
+  try {
+    localStorage.setItem(MODERATION_KEY, JSON.stringify({
+      banned: (m.banned || []).slice(-MODERATION_CAP),
+      hidden: (m.hidden || []).slice(-MODERATION_CAP),
+    }))
+    return true
+  } catch { return false }
+}
+
+/** Ban a sender address. Returns the updated moderation state. */
+export function banSender(address) {
+  const m = getModeration()
+  if (!address || m.banned.includes(address)) return m
+  const next = { ...m, banned: [...m.banned, address] }
+  saveModeration(next)
+  return next
+}
+
+export function unbanSender(address) {
+  const m = getModeration()
+  const next = { ...m, banned: m.banned.filter(a => a !== address) }
+  saveModeration(next)
+  return next
+}
+
+/** Hide a single message by transaction signature. */
+export function hideMessage(signature) {
+  const m = getModeration()
+  if (!signature || m.hidden.includes(signature)) return m
+  const next = { ...m, hidden: [...m.hidden, signature] }
+  saveModeration(next)
+  return next
+}
+
+export function unhideMessage(signature) {
+  const m = getModeration()
+  const next = { ...m, hidden: m.hidden.filter(s => s !== signature) }
+  saveModeration(next)
+  return next
+}
+
+export function clearModeration() {
+  saveModeration({ banned: [], hidden: [] })
+  return { banned: [], hidden: [] }
+}
+
 const H173K_DECIMALS_KEY = 'h173kbc_display_decimals'
 export const DEFAULT_H173K_DECIMALS = 4
 export function getH173KDecimals() {
