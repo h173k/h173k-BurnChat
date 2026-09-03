@@ -359,10 +359,13 @@ function RpcGate({ onDone }) {
         </p>
         <div className="form-group">
           <label className="form-label">RPC endpoint</label>
-          <input className="form-input" type="url" inputMode="url"
+          {/* Masked: the endpoint usually carries an API key, and this screen
+              is the one most likely to be on camera during a first-run walkthrough. */}
+          <input className="form-input" type="password"
             placeholder="https://mainnet.helius-rpc.com/?api-key=…"
             value={url} onChange={e => onChange(e.target.value)}
-            spellCheck={false} autoCapitalize="none" autoCorrect="off" />
+            spellCheck={false} autoCapitalize="none" autoCorrect="off"
+            autoComplete="off" />
           <span className="form-hint">
             Free tiers from Helius, QuickNode, Alchemy or Ankr all work. Create a project there,
             copy its mainnet HTTPS URL and paste it here. You can change it later in Settings.
