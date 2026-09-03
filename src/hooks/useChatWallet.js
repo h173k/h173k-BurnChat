@@ -26,11 +26,15 @@ import {
   ATA_RENT, WSOL_ATA_RENT, BASE_TX_FEE,
   getReplenishSettings, getReplenishEnabled,
 } from '../constants'
+import { formatH173K } from '../utils'
 import { useSwap } from './useSwap'
 
 const POW = Math.pow(10, TOKEN_DECIMALS)
 // Small cushion on top of every computed SOL requirement.
 const SOL_SAFETY_BUFFER = 0.0005
+// The MAX button fills a little under the live pool quote, so slippage between
+// pressing it and the swap landing can't make its own suggestion unreachable.
+const MAX_FILL_HAIRCUT = 0.97
 
 export function useChatWallet(connection, sessionWallet, refreshMs = 20000) {
   const [solBalance, setSolBalance] = useState(0)
@@ -149,6 +153,42 @@ export function useChatWallet(connection, sessionWallet, refreshMs = 20000) {
     }
     return raw
   }, [readH173kRaw])
+
+  /**
+   * What the wallet's spendable SOL is actually worth in h173k right now,
+   * priced against the live pool reserves.
+   *
+   * This is the cheap question that has to be asked *before* anything is built
+   * or signed. Without it, asking to burn more h173k than the SOL can buy used
+   * to run the whole machine anyway — quote, swap transaction, confirmation
+   * wait, balance polling — and only then come back with a smaller burn or a
+   * failure, half a minute later. Reserves come from `getPool()`, which serves
+   * a cached copy for a few seconds, so on the common path this costs one
+   * balance read.
+   *
+   * `priced` says whether the pool could be reached at all. When it is false
+   * the caller must not treat `obtainable` as authoritative — an RPC hiccup
+   * while pricing should not block a burn that would otherwise work.
+   */
+  const quoteSolCapacity = useCallback(async (burnAddress, knownCosts) => {
+    const costs = knownCosts || await estimateCosts(burnAddress)
+    const sol = await connection.getBalance(sessionWallet.publicKey) / LAMPORTS_PER_SOL
+    const spendable = sol - costs.swapReserve
+    if (!(spendable > 0)) {
+      return { sol, spendable: 0, obtainable: 0, priced: true, swapReserve: costs.swapReserve }
+    }
+    try {
+      const q = await swap.getSwapQuoteSOLtoH173K(spendable)
+      return {
+        sol, spendable,
+        obtainable: Math.max(0, q.outputAmount || 0),
+        priced: true,
+        swapReserve: costs.swapReserve,
+      }
+    } catch {
+      return { sol, spendable, obtainable: 0, priced: false, swapReserve: costs.swapReserve }
+    }
+  }, [connection, sessionWallet, estimateCosts, swap])
 
   /* ---------- burn transaction ---------- */
 
@@ -279,17 +319,12 @@ export function useChatWallet(connection, sessionWallet, refreshMs = 20000) {
     const have = Number(haveRaw) / POW
     let fromSol = 0
     try {
-      const { swapReserve } = await estimateCosts(burnAddress)
-      const sol = await connection.getBalance(sessionWallet.publicKey) / LAMPORTS_PER_SOL
-      const spendable = sol - swapReserve
-      if (spendable > 0) {
-        const q = await swap.getSwapQuoteSOLtoH173K(spendable)
-        // stay under the quote so slippage can't make the number unreachable
-        fromSol = Math.max(0, (q.outputAmount || 0) * 0.97)
-      }
+      const cap = await quoteSolCapacity(burnAddress)
+      // stay under the quote so slippage can't make the number unreachable
+      fromSol = cap.obtainable * MAX_FILL_HAIRCUT
     } catch { /* leave fromSol at 0 */ }
     return { total: have + fromSol, fromH173k: have, fromSol }
-  }, [connection, sessionWallet, readH173kRaw, estimateCosts, swap])
+  }, [readH173kRaw, quoteSolCapacity])
 
   /**
    * PUBLIC unified entry (req 16): the user only specifies how much h173k to burn.
@@ -300,8 +335,6 @@ export function useChatWallet(connection, sessionWallet, refreshMs = 20000) {
    */
   const burn = useCallback(async (amountH173k, memoString, burnAddress, onProgress) => {
     setError(null)
-    const pk = sessionWallet.publicKey
-
     const costs = await estimateCosts(burnAddress)
     let haveRaw = await readH173kRaw()
     let have = Number(haveRaw) / POW
@@ -309,19 +342,33 @@ export function useChatWallet(connection, sessionWallet, refreshMs = 20000) {
     // Top up from SOL if h173k is insufficient
     if (have < amountH173k) {
       const shortfall = amountH173k - have
-      const sol = await connection.getBalance(pk) / LAMPORTS_PER_SOL
-      const spendable = sol - costs.swapReserve
-      if (!(spendable > 0)) {
+      onProgress?.('Checking the pool price…')
+      const cap = await quoteSolCapacity(burnAddress, costs)
+      if (!(cap.spendable > 0)) {
         throw new Error(
           `Not enough h173k, and not enough SOL to convert. ` +
-          `You have ${sol.toFixed(6)} SOL — about ${costs.swapReserve.toFixed(4)} SOL is needed ` +
+          `You have ${cap.sol.toFixed(6)} SOL — about ${costs.swapReserve.toFixed(4)} SOL is needed ` +
           `for account rent and fees before any of it can be swapped.`
         )
       }
+      // Refuse an impossible amount here rather than discovering it after a
+      // swap has already been sent. The ceiling is the raw pool quote, so an
+      // amount produced by the MAX button (which sits deliberately under it)
+      // is never rejected; only a request the pool plainly cannot fill is.
+      if (cap.priced && amountH173k > have + cap.obtainable) {
+        const maxBurn = have + cap.obtainable * MAX_FILL_HAIRCUT
+        throw new Error(
+          `Not enough funds to burn ${formatH173K(amountH173k)} h173k. ` +
+          `Your ${cap.spendable.toFixed(6)} spendable SOL is worth about ` +
+          `${formatH173K(cap.obtainable)} h173k at the current pool price, so the most you can ` +
+          `burn right now is about ${formatH173K(maxBurn)} h173k. Lower the amount, or deposit more.`
+        )
+      }
+
       onProgress?.('Pricing SOL → h173k…')
       let solNeeded = await swap.quoteSOLForH173K(shortfall)
       // cap to what we can spend; we'll burn whatever h173k we end up with
-      if (solNeeded > spendable) solNeeded = spendable
+      if (solNeeded > cap.spendable) solNeeded = cap.spendable
       if (!(solNeeded > 0)) throw new Error('Amount too small to convert from SOL')
 
       onProgress?.('Converting SOL → h173k…')
@@ -343,8 +390,8 @@ export function useChatWallet(connection, sessionWallet, refreshMs = 20000) {
     await fetchBalances()
     return { signature: res.signature, sentAmount: res.sentAmount }
   }, [
-    connection, sessionWallet, swap, readH173kRaw, waitForH173kIncrease,
-    estimateCosts, runBurnTransfer, fetchBalances,
+    swap, readH173kRaw, waitForH173kIncrease,
+    estimateCosts, quoteSolCapacity, runBurnTransfer, fetchBalances,
   ])
 
   return {

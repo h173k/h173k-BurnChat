@@ -125,8 +125,18 @@ export function saveBurnAddress(addr) {
 // Persist the "amount to burn" so it survives closing/reopening the app.
 const DRAFT_AMOUNT_KEY = 'h173kbc_draft_amount'
 
+// Prefilled on a wallet that has never set an amount, so the burn button is
+// usable straight away instead of starting on an empty, disabled form.
+export const DEFAULT_DRAFT_AMOUNT = '0.00001'
+
 export function getDraftAmount() {
-  try { return localStorage.getItem(DRAFT_AMOUNT_KEY) || '' } catch { return '' }
+  try {
+    const v = localStorage.getItem(DRAFT_AMOUNT_KEY)
+    // Only an *absent* key falls back to the default. An empty stored string
+    // means the user deliberately cleared the field, and refilling it on every
+    // reopen would fight them.
+    return v === null ? DEFAULT_DRAFT_AMOUNT : v
+  } catch { return DEFAULT_DRAFT_AMOUNT }
 }
 export function saveDraftAmount(v) {
   try { localStorage.setItem(DRAFT_AMOUNT_KEY, v == null ? '' : String(v)); return true } catch { return false }
