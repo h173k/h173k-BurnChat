@@ -6,21 +6,25 @@ import {
 } from './notify'
 import {
   getRpcEndpoint, saveRpcEndpoint, validateRpcEndpoint, DEFAULT_RPC_ENDPOINT,
+  isRpcConfigured, isRpcUrlShapeValid,
   getBurnAddress, saveBurnAddress, DEFAULT_BURN_ADDRESS,
   getDraftAmount, saveDraftAmount,
   getChatSettings, saveChatSettings,
-  getGoalProgress, saveGoalProgress, resetGoalProgress,
+  getGoalProgress, saveGoalProgress, resetGoalProgress, goalBurnedFor,
+  makeGoal, MAX_GOALS, DEFAULT_GOAL_TEXT,
   getFxState, saveFxState, capList,
   getReplenishSettings, saveReplenishSettings, getReplenishEnabled, saveReplenishEnabled,
   getH173KDecimals, saveH173KDecimals,
   getModeration, banSender, unbanSender, hideMessage, unhideMessage, clearModeration,
+  archiveHiddenMessage, archiveAllHiddenMessages, unarchiveHiddenMessages,
+  unhideArchivedMessages, allHiddenSignatures,
   TOKEN_TICKER, TOKEN_SYMBOL, MAX_TEXT_CHARS, MAX_MEMO_BYTES, MEMO_SEP,
   SORT_NEWEST, SORT_LARGEST, UNIT_H173K, UNIT_USDT,
   FX_NICK_SIZE_MIN, FX_NICK_SIZE_MAX, FX_DURATION_MIN, FX_DURATION_MAX,
   FX_TEXT_SIZE_MIN, FX_TEXT_SIZE_MAX, FX_VPOS_MIN, FX_VPOS_MAX,
   FX_DIM_MIN, FX_DIM_MAX, TICKER_SIZE_MIN, TICKER_SIZE_MAX,
   MIN_TRIGGER_THRESHOLD, MIN_REPLENISH_TO, MIN_SWAP_PRIORITY_FEE,
-  BALANCE_REFRESH_MIN, BALANCE_REFRESH_MAX, GOAL_TITLE_MAX,
+  BALANCE_REFRESH_MIN, BALANCE_REFRESH_MAX, GOAL_TITLE_MAX, GOAL_KEYWORDS_MAX,
   maxVisibilityFloor, minEffectThreshold, enforceThresholdOrder,
   GOAL_TITLE_SIZE_MIN, GOAL_TITLE_SIZE_MAX, APP_VERSION, BUILD_TIME,
 } from './constants'
@@ -32,13 +36,13 @@ import {
   checkBiometricSupport, isBiometricSetup, setupBiometric, authenticateBiometric, removeBiometric,
 } from './crypto/auth'
 import { useBurnChat } from './hooks/useBurnChat'
+import { accumulateGoals, resetOneGoal } from './goals'
 import { getReferralFromURL, generateReferralLink } from './referral'
 import { useChatWallet } from './hooks/useChatWallet'
 import { useTokenPrice, formatLastUpdated } from './usePrice'
 import {
   formatH173K, formatUSD, formatNumber, truncateAddress,
   byteLength, charLength, truncateToBytes, truncateToChars, timeAgo,
-  parseGoalKeywords, messageMatchesGoal,
 } from './utils'
 import { QRCodeGenerator } from './components/QRCode'
 
@@ -218,7 +222,7 @@ function InstallGate() {
 
 /* ============================================================ */
 export default function App() {
-  const [appState, setAppState] = useState('loading') // loading | onboard | locked | ready
+  const [appState, setAppState] = useState('loading') // loading | rpc | onboard | locked | ready
   const [rpcVersion, setRpcVersion] = useState(0)
   // Phones that aren't installed to the home screen get a full-screen install
   // gate instead of the app. Computed once: installing always relaunches in a
@@ -243,6 +247,19 @@ export default function App() {
         window.history.replaceState({}, '', url.toString())
       } catch {}
     }
+    // The RPC endpoint is asked for before anything else — creating an account,
+    // restoring one, or just unlocking. Without an endpoint of their own the
+    // app runs on the shared public node, which is rate-limited hard enough
+    // that the chat looks broken and burns silently fail. There is no way past
+    // this screen until one has been set at least once.
+    if (!isRpcConfigured()) { setAppState('rpc'); return }
+    if (!walletExists() || !isPINSetup()) setAppState('onboard')
+    else setAppState('locked')
+  }, [])
+
+  // Once an endpoint exists, carry on into whichever screen was due.
+  const afterRpc = useCallback(() => {
+    setRpcVersion(v => v + 1)
     if (!walletExists() || !isPINSetup()) setAppState('onboard')
     else setAppState('locked')
   }, [])
@@ -254,6 +271,7 @@ export default function App() {
       <div className="loading-logo"><img src={LOGO} className="logo-img" alt="" /></div>
       <div className="loading-spinner" /></div></div></Background>
   }
+  if (appState === 'rpc') return <Background><RpcGate onDone={afterRpc} /></Background>
   if (appState === 'onboard') return <Background><Onboarding onDone={() => setAppState('ready')} /></Background>
   if (appState === 'locked') return <Background><LockScreen onUnlock={() => setAppState('ready')} /></Background>
   return <Background><Main connection={connection} onRpcChange={() => setRpcVersion(v => v + 1)} onLock={() => { sessionWallet.lock(); setAppState('locked') }} /></Background>
@@ -265,6 +283,100 @@ function Background({ children }) {
       <div className="app-background"><div className="light-streak" /></div>
       <div className="app-container"><div className="wallet-app">{children}</div></div>
     </>
+  )
+}
+
+/* ---------------- RPC gate (shown before anything else) ---------------- */
+/**
+ * Asks for a Solana RPC endpoint and refuses to continue without one.
+ *
+ * This runs ahead of account creation, import and unlock, because every one of
+ * those immediately starts reading the chain. On the shared public endpoint
+ * those reads are throttled to the point where the chat never fills in and a
+ * burn can fail without a clear reason — which reads as "the app is broken"
+ * right at the moment a new user first opens it. The screen therefore has no
+ * skip: the field must hold something usable before the button does anything.
+ *
+ * The health check is a courtesy, not a gate. Plenty of providers reject
+ * `getHealth` on their free tier while serving everything else perfectly, so a
+ * failed check downgrades to a warning and an explicit "use it anyway", rather
+ * than locking out a working endpoint.
+ */
+function RpcGate({ onDone }) {
+  const [url, setUrl] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  // Set once a health check has failed for the value currently in the field,
+  // which is what turns the button into an explicit override.
+  const [unverified, setUnverified] = useState(false)
+
+  const shapeOk = isRpcUrlShapeValid(url)
+
+  const onChange = (v) => {
+    setUrl(v)
+    setErr('')
+    setUnverified(false)
+  }
+
+  const save = () => {
+    saveRpcEndpoint(url.trim())
+    onDone()
+  }
+
+  const submit = async () => {
+    if (busy) return
+    setErr('')
+    if (!url.trim()) { setErr('Enter your RPC endpoint to continue.'); return }
+    if (!shapeOk) { setErr('That does not look like a URL. It should start with https:// — paste the full endpoint from your provider.'); return }
+    if (unverified) { save(); return }   // second press = "I know, use it anyway"
+    setBusy(true)
+    try {
+      const ok = await validateRpcEndpoint(url.trim())
+      if (ok) { save(); return }
+      setUnverified(true)
+      setErr("Couldn't get a response from that endpoint. Check the address, or press again to use it anyway.")
+    } catch {
+      setUnverified(true)
+      setErr("Couldn't reach that endpoint. Check the address, or press again to use it anyway.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="onboarding"><div className="onboarding-container">
+      <div className="onboarding-step">
+        <div className="onboarding-logo"><img src={LOGO} className="logo-img large" alt="" /></div>
+        <h1 className="onboarding-title">Connect to Solana</h1>
+        <p className="onboarding-subtitle">
+          Burn Chat reads and writes directly to the Solana network, so it needs an RPC endpoint.
+          Add your own — the free shared one is rate-limited and will make the chat stall.
+        </p>
+        <div className="form-group">
+          <label className="form-label">RPC endpoint</label>
+          <input className="form-input" type="url" inputMode="url"
+            placeholder="https://mainnet.helius-rpc.com/?api-key=…"
+            value={url} onChange={e => onChange(e.target.value)}
+            spellCheck={false} autoCapitalize="none" autoCorrect="off" />
+          <span className="form-hint">
+            Free tiers from Helius, QuickNode, Alchemy or Ankr all work. Create a project there,
+            copy its mainnet HTTPS URL and paste it here. You can change it later in Settings.
+          </span>
+        </div>
+        {err && <div className="error-message">{err}</div>}
+        <button className="btn btn-action" disabled={busy || !url.trim()} onClick={submit}>
+          {busy ? 'Checking…' : unverified ? 'Use this endpoint anyway' : 'Check & continue'}
+        </button>
+        <button className="convert-sol-btn" style={{ marginTop: 12 }}
+          onClick={() => onChange(DEFAULT_RPC_ENDPOINT)}>
+          Use the public endpoint instead (not recommended)
+        </button>
+        <span className="form-hint" style={{ display: 'block', marginTop: 8 }}>
+          The public endpoint is fine for a quick look, but it drops requests under load — expect
+          missing messages and failed burns.
+        </span>
+      </div>
+    </div></div>
   )
 }
 
@@ -600,12 +712,13 @@ function Main({ connection, onRpcChange, onLock }) {
   const [moderation, setModeration] = useState(getModeration)
   const [burnAddress, setBurnAddress] = useState(getBurnAddress())
   const [fxMessage, setFxMessage] = useState(null)
-  const [goalFxOpen, setGoalFxOpen] = useState(false)
+  // Several goals can be reached by the same burn, so celebrations queue up and
+  // play one after another instead of overwriting each other.
+  const [goalFxQueue, setGoalFxQueue] = useState([])
   // Burn-goal progress. Initialised from localStorage so it accumulates across
   // restarts. The refs mirror the persisted state for use inside effects.
   const [goalProgress, setGoalProgress] = useState(getGoalProgress)
   const goalProgressRef = useRef(goalProgress)
-  const countedRef = useRef(new Set(goalProgress.counted || []))
   // Big burns that already played their celebration (persisted across runs).
   const celebratedRef = useRef(new Set(getFxState().sigs || []))
   const [toast, setToast] = useState(null)
@@ -642,10 +755,21 @@ function Main({ connection, onRpcChange, onLock }) {
     return Array.from(map.values())
   }, [chat.messages, localMsgs])
 
+  // Signature → message, so the hidden list in Settings can show a nickname and
+  // a snippet instead of a bare transaction hash. Only covers messages still
+  // loaded in this session; older ones fall back to the signature.
+  const messageIndex = useMemo(() => {
+    const map = new Map()
+    for (const m of allMessages) map.set(m.signature, m)
+    return map
+  }, [allMessages])
+
   // filter + sort (req 8, 10)
   const visible = useMemo(() => {
     const bannedSet = new Set(moderation.banned)
-    const hiddenSet = new Set(moderation.hidden)
+    // Includes entries the user cleared off the Settings list: dismissing a row
+    // there is a housekeeping action, not an un-hide.
+    const hiddenSet = allHiddenSignatures(moderation)
     let arr = allMessages.filter(m =>
       m.amount >= (settings.minBurnFilter || 0) &&
       !bannedSet.has(m.sender) &&
@@ -691,7 +815,7 @@ function Main({ connection, onRpcChange, onLock }) {
     // point of blocking someone. They are still marked as celebrated below, so
     // unblocking later doesn't cause a burst of old effects to fire.
     const bannedSet = new Set(moderation.banned)
-    const hiddenSet = new Set(moderation.hidden)
+    const hiddenSet = allHiddenSignatures(moderation)
     const fresh = allMessages.filter(
       m => m.amount >= settings.fxThreshold && !celebratedRef.current.has(m.signature)
     )
@@ -715,66 +839,16 @@ function Main({ connection, onRpcChange, onLock }) {
   // kept in localStorage so it survives restarts.
   useEffect(() => {
     if (chat.loading) return
-    // A switched-off goal and a paused goal both freeze the total; the only
-    // difference is that a switched-off goal is also hidden in the chat.
-    // Crucially the effect still runs while frozen, so incoming messages are
-    // absorbed (marked as seen without being added). Returning early here
-    // would leave them unseen and back-fill the whole backlog the moment the
-    // goal was switched on again.
-    const frozen = !settings.goalEnabled || !!settings.goalPaused
-    const keywords = parseGoalKeywords(settings.goalKeywords)
-    const prev = goalProgressRef.current
-    let burned = prev.burned
-    let reached = prev.reached
-    let lastTarget = prev.lastTarget
-    let started = prev.started
-    let changed = false
-    if (!started) {
-      // Baseline: ignore everything already on screen, start fresh from now.
-      countedRef.current = new Set(allMessages.map(m => m.signature))
-      burned = 0
-      reached = false
-      lastTarget = settings.goalTarget
-      started = true
-      changed = true
-    } else {
-      for (const m of allMessages) {
-        if (!countedRef.current.has(m.signature)) {
-          // Mark as seen FIRST, always. While the goal is frozen (paused or
-          // switched off) this is the whole point: those messages get absorbed
-          // here, so resuming does not retroactively add the backlog. The same
-          // applies to messages rejected by the keyword filter.
-          countedRef.current.add(m.signature)
-          if (!frozen && m.amount > 0 && messageMatchesGoal(m, keywords)) {
-            burned += m.amount
-          }
-          changed = true
-        }
-      }
-      // Changing the target arms the celebration again for the new goal.
-      if (settings.goalTarget !== lastTarget) {
-        lastTarget = settings.goalTarget
-        reached = false
-        changed = true
-      }
-    }
-    let popup = false
-    if (!frozen && settings.goalTarget > 0 && burned >= settings.goalTarget && !reached) {
-      reached = true
-      popup = true
-      changed = true
-    }
+    const { next, popups, changed } = accumulateGoals(
+      goalProgressRef.current, settings.goals, allMessages, settings.goalEnabled
+    )
     if (changed) {
-      const capped = capList([...countedRef.current])
-      countedRef.current = new Set(capped)
-      const next = { burned, reached, lastTarget, started, counted: capped }
       goalProgressRef.current = next
       setGoalProgress(next)
       saveGoalProgress(next)
     }
-    if (popup) setGoalFxOpen(true)
-  }, [allMessages, chat.loading, settings.goalEnabled, settings.goalTarget,
-      settings.goalPaused, settings.goalKeywords])
+    if (popups.length) setGoalFxQueue(q => [...q, ...popups])
+  }, [allMessages, chat.loading, settings.goalEnabled, settings.goals])
 
   // --- Incoming-burn notifications ---
   // Baseline on the first pass so opening the app never dumps the existing
@@ -820,16 +894,27 @@ function Main({ connection, onRpcChange, onLock }) {
   }, [allMessages, chat.loading, pubkey, settings.notifyEnabled,
       settings.notifyMinAmount, settings.notifyOnlyWhenHidden])
 
-  const resetGoal = useCallback(() => {
+  /**
+   * Restart one goal's count. Dropping its entry makes the effect above
+   * re-baseline it on the next pass; the shared `seen` list is left alone, so
+   * the burns already on screen stay excluded and only new ones count.
+   */
+  const resetGoal = useCallback((goalId) => {
+    const next = resetOneGoal(goalProgressRef.current, goalId)
+    goalProgressRef.current = next
+    setGoalProgress(next)
+    saveGoalProgress(next)
+    setGoalFxQueue(q => q.filter(p => p.goalId !== goalId))
+  }, [])
+
+  /** Wipe every goal's progress, including the shared baseline. */
+  const resetAllGoals = useCallback(() => {
     resetGoalProgress()
-    // started:false → the next effect run re-baselines to "now", so the count
-    // restarts fresh and ignores the current backlog.
-    const fresh = { burned: 0, reached: false, lastTarget: settings.goalTarget, started: false, counted: [] }
-    countedRef.current = new Set()
+    const fresh = { seen: [], goals: {} }
     goalProgressRef.current = fresh
     setGoalProgress(fresh)
-    setGoalFxOpen(false)
-  }, [settings.goalTarget])
+    setGoalFxQueue([])
+  }, [])
 
   const showToast = useCallback((msg, kind = 'ok') => {
     setToast({ msg, kind }); setTimeout(() => setToast(null), 4000)
@@ -852,12 +937,33 @@ function Main({ connection, onRpcChange, onLock }) {
 
   const onUnhideMessage = useCallback((signature) => {
     setModeration(unhideMessage(signature))
+    showToast('Message restored to the chat')
+  }, [showToast])
+
+  // Housekeeping only: the message stays filtered out of the chat, it just
+  // stops taking up room on the review list.
+  const onArchiveHidden = useCallback((signature) => {
+    setModeration(archiveHiddenMessage(signature))
   }, [])
+
+  const onArchiveAllHidden = useCallback(() => {
+    setModeration(archiveAllHiddenMessages())
+    showToast('List cleared — those messages stay hidden')
+  }, [showToast])
+
+  const onUnarchiveHidden = useCallback(() => {
+    setModeration(unarchiveHiddenMessages())
+  }, [])
+
+  const onUnhideArchived = useCallback(() => {
+    setModeration(unhideArchivedMessages())
+    showToast('Dismissed messages are visible again')
+  }, [showToast])
 
   const onClearModeration = useCallback(() => {
     setModeration(clearModeration())
     showToast('Moderation list cleared')
-  }, [])
+  }, [showToast])
 
   // Replay a big burn's celebration on demand (tapping the message). Purely a
   // display action — it doesn't touch the "already celebrated" bookkeeping, so
@@ -955,10 +1061,13 @@ function Main({ connection, onRpcChange, onLock }) {
           onRpcChange={onRpcChange} onLock={onLock}
           onBack={() => setView('chat')}
           pubkey={pubkey} h173kDecimals={getH173KDecimals()}
-          goalBurned={goalProgress.burned} onResetGoal={resetGoal}
+          goalProgress={goalProgress} onResetGoal={resetGoal} onResetAllGoals={resetAllGoals}
           wallet={wallet}
           moderation={moderation} onUnbanSender={onUnbanSender}
           onUnhideMessage={onUnhideMessage} onClearModeration={onClearModeration}
+          onArchiveHidden={onArchiveHidden} onArchiveAllHidden={onArchiveAllHidden}
+          onUnarchiveHidden={onUnarchiveHidden} onUnhideArchived={onUnhideArchived}
+          messageIndex={messageIndex}
         />
       ) : (
         <ChatView
@@ -966,7 +1075,7 @@ function Main({ connection, onRpcChange, onLock }) {
           settings={settings} price={price} status={chat.status} loading={chat.loading} error={chat.error}
           wallet={wallet} burnAddress={burnAddress} pubkey={pubkey}
           onSent={onSent} showToast={showToast}
-          goalBurned={goalProgress.burned}
+          goalProgress={goalProgress}
           needsDeposit={needsDeposit} onCloseDeposit={() => setDepositDismissed(true)}
           showRpcBanner={showRpcBanner} onDismissRpcBanner={() => setRpcBannerDismissed(true)}
           onOpenSettings={openSettings}
@@ -978,7 +1087,10 @@ function Main({ connection, onRpcChange, onLock }) {
       )}
 
       {fxMessage && <BurnFx message={fxMessage} settings={settings} price={price} onClose={() => setFxMessage(null)} />}
-      {goalFxOpen && <GoalFx settings={settings} burned={goalProgress.burned} price={price} onClose={() => setGoalFxOpen(false)} />}
+      {goalFxQueue.length > 0 && (
+        <GoalFx key={goalFxQueue[0].goalId} popup={goalFxQueue[0]} settings={settings} price={price}
+          onClose={() => setGoalFxQueue(q => q.slice(1))} />
+      )}
       {showReceive && <ReceiveModal pubkey={pubkey} onClose={() => setShowReceive(false)} />}
       {toast && <div className={`toast ${toast.kind}`}>{toast.msg}</div>}
     </div>
@@ -998,7 +1110,7 @@ function PriceTag({ price, tickerSize }) {
 }
 
 /* ---------------- Chat ---------------- */
-function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalBurned, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount, onReplayFx, onHideMessage, onBanSender }) {
+function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalProgress, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount, onReplayFx, onHideMessage, onBanSender }) {
   const displayAmount = useCallback((amt) => {
     if (settings.displayUnit === UNIT_USDT && price.price != null) return formatUSD(amt * price.price)
     return `${formatH173K(amt)} ${TOKEN_TICKER}`
@@ -1033,7 +1145,7 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
         <span>{messages.length}{settings.minBurnFilter > 0 ? ` / ${totalCount}` : ''} messages</span>
       </div>
 
-      <GoalBar settings={settings} burned={goalBurned} displayAmount={displayAmount} />
+      <GoalBars settings={settings} progress={goalProgress} displayAmount={displayAmount} />
 
       <ThresholdNotice settings={settings} displayAmount={displayAmount} />
 
@@ -1415,21 +1527,40 @@ function ThresholdNotice({ settings, displayAmount }) {
   )
 }
 
-function GoalBar({ settings, burned, displayAmount }) {
-  if (!settings.goalEnabled || !(settings.goalTarget > 0)) return null
-  const total = burned > 0 ? burned : 0
-  const pct = Math.min(100, (total / settings.goalTarget) * 100)
-  const reached = total >= settings.goalTarget
-  // Custom title falls back to the generic label when left empty.
-  const title = (settings.goalTitle || '').trim() || 'Burn goal'
+/**
+ * Every configured goal, stacked. Goals without a target are skipped rather
+ * than drawn as an empty bar — a half-configured goal shouldn't reach the
+ * broadcast screen. With one goal configured this renders exactly as before.
+ */
+function GoalBars({ settings, progress, displayAmount }) {
+  if (!settings.goalEnabled) return null
+  const goals = (settings.goals || []).filter(g => Number(g.target) > 0)
+  if (!goals.length) return null
   const titleSize = Number(settings.goalTitleSize) > 0 ? Number(settings.goalTitleSize) : 13
+  return (
+    <div className="goal-bars">
+      {goals.map(g => (
+        <GoalBar key={g.id} goal={g} burned={goalBurnedFor(progress, g.id)}
+          titleSize={titleSize} displayAmount={displayAmount} />
+      ))}
+    </div>
+  )
+}
+
+function GoalBar({ goal, burned, titleSize, displayAmount }) {
+  const target = Number(goal.target) || 0
+  const total = burned > 0 ? burned : 0
+  const pct = target > 0 ? Math.min(100, (total / target) * 100) : 0
+  const reached = target > 0 && total >= target
+  // Custom title falls back to the generic label when left empty.
+  const title = (goal.title || '').trim() || 'Burn goal'
   return (
     <div className={`goal-bar ${reached ? 'reached' : ''}`}>
       <div className="goal-bar-head">
         <span className="goal-bar-title" style={{ fontSize: titleSize }}>
           <span className="goal-bar-title-ic">{Icon.fire}</span>
           <span className="goal-bar-title-text">{title}</span>
-          {settings.goalPaused && <span className="goal-bar-paused">paused</span>}
+          {goal.paused && <span className="goal-bar-paused">paused</span>}
         </span>
         <span className="goal-bar-pct">{reached ? '100' : pct.toFixed(pct < 10 ? 2 : 1)}%</span>
       </div>
@@ -1438,21 +1569,24 @@ function GoalBar({ settings, burned, displayAmount }) {
       </div>
       <div className="goal-bar-foot">
         <span className="goal-bar-burned">{displayAmount(total)}</span>
-        <span className="goal-bar-target dim">/ {displayAmount(settings.goalTarget)}</span>
+        <span className="goal-bar-target dim">/ {displayAmount(target)}</span>
       </div>
     </div>
   )
 }
 
-function GoalFx({ settings, burned, price, onClose }) {
+function GoalFx({ popup, settings, price, onClose }) {
   useEffect(() => {
     const secs = Number(settings.fxDuration) > 0 ? Number(settings.fxDuration) : 8
     const t = setTimeout(onClose, Math.max(secs, 4) * 1000)
     return () => clearTimeout(t)
   }, [onClose, settings.fxDuration])
+  const burned = popup.burned || 0
   const amountStr = settings.displayUnit === UNIT_USDT && price.price != null
     ? formatUSD(burned * price.price)
     : `${formatH173K(burned)} h173k`
+  // With several goals running, the celebration has to say which one landed.
+  const title = (popup.title || '').trim()
   let dim = Number(settings.fxDim)
   if (!Number.isFinite(dim)) dim = 85
   dim = Math.min(100, Math.max(0, dim)) / 100
@@ -1464,8 +1598,9 @@ function GoalFx({ settings, burned, price, onClose }) {
       <div className="fx-card">
         <div className="fx-flames">🎉🔥🎉</div>
         <div className="fx-label">GOAL REACHED</div>
+        {title && <div className="fx-goal-title">{title}</div>}
         <div className="fx-amount">{amountStr}</div>
-        <div className="fx-text" style={{ fontSize: 20, marginTop: 8 }}>{settings.goalText}</div>
+        <div className="fx-text" style={{ fontSize: 20, marginTop: 8 }}>{popup.text || DEFAULT_GOAL_TEXT}</div>
         <div className="fx-hint">tap to dismiss</div>
       </div>
     </div>
@@ -1526,10 +1661,24 @@ function BurnFx({ message, settings, price, onClose }) {
  * Nothing here touches the chain — these lists only decide what this device
  * renders, which for a broadcaster is the screen going out on stream.
  */
-function ModerationSettings({ moderation, onUnban, onUnhide, onClear }) {
+/* How many hidden entries are drawn before the list is folded away. Chosen to
+   stay scrollable on a phone; a long stream can hide far more than this. */
+const HIDDEN_PAGE = 20
+
+function ModerationSettings({
+  moderation, messageIndex, onUnban, onUnhide, onClear,
+  onArchiveHidden, onArchiveAllHidden, onUnarchiveHidden, onUnhideArchived,
+}) {
   const banned = moderation?.banned || []
   const hidden = moderation?.hidden || []
-  const empty = banned.length === 0 && hidden.length === 0
+  const archived = moderation?.hiddenArchived || []
+  const [showAllHidden, setShowAllHidden] = useState(false)
+  const empty = banned.length === 0 && hidden.length === 0 && archived.length === 0
+
+  // Newest first: the message just hidden is the one most likely to be undone.
+  const ordered = useMemo(() => [...hidden].reverse(), [hidden])
+  const shown = showAllHidden ? ordered : ordered.slice(0, HIDDEN_PAGE)
+
   return (
     <>
       <span className="form-hint">
@@ -1553,21 +1702,78 @@ function ModerationSettings({ moderation, onUnban, onUnhide, onClear }) {
       {hidden.length > 0 && (
         <div className="form-group">
           <label className="form-label">Hidden messages ({hidden.length})</label>
+          <span className="form-hint">
+            <b>Restore</b> puts a message back in the chat. <b>Remove from list</b> only clears the
+            entry from here — the message stays hidden. Use it to keep this list short after a
+            long stream.
+          </span>
           <div className="mod-list">
-            {hidden.map(sig => (
-              <div className="mod-row" key={sig}>
-                <a className="mod-addr" href={`https://solscan.io/tx/${sig}`}
-                  target="_blank" rel="noreferrer noopener" title={sig}>{truncateAddress(sig, 8, 8)}</a>
-                <button className="mod-undo" onClick={() => onUnhide(sig)}>Restore</button>
-              </div>
+            {shown.map(sig => (
+              <HiddenRow key={sig} sig={sig} message={messageIndex?.get(sig)}
+                onUnhide={onUnhide} onArchive={onArchiveHidden} />
             ))}
           </div>
+          {ordered.length > HIDDEN_PAGE && (
+            <button className="convert-sol-btn" style={{ marginTop: 8 }}
+              onClick={() => setShowAllHidden(v => !v)}>
+              {showAllHidden
+                ? `Show only the newest ${HIDDEN_PAGE}`
+                : `Show all ${ordered.length} hidden messages`}
+            </button>
+          )}
+          <button className="convert-sol-btn" style={{ marginTop: 8 }} onClick={onArchiveAllHidden}>
+            Remove all from this list (they stay hidden)
+          </button>
+        </div>
+      )}
+      {archived.length > 0 && (
+        <div className="form-group">
+          <label className="form-label">Dismissed from the list ({archived.length})</label>
+          <span className="form-hint">
+            Still hidden in the chat, just not listed above. Bring them back here if you need to
+            review or restore them.
+          </span>
+          <button className="convert-sol-btn" onClick={onUnarchiveHidden}>
+            Show them in the list again
+          </button>
+          <button className="convert-sol-btn" style={{ marginTop: 8 }} onClick={onUnhideArchived}>
+            Restore all {archived.length} to the chat
+          </button>
         </div>
       )}
       {!empty && (
         <button className="convert-sol-btn" onClick={onClear}>Clear the whole list</button>
       )}
     </>
+  )
+}
+
+/**
+ * One hidden message. Shows the nickname and a snippet when the message is
+ * still loaded in this session — a bare signature tells the user nothing about
+ * what they hid, which is the main reason the old list was hard to work with.
+ */
+function HiddenRow({ sig, message, onUnhide, onArchive }) {
+  const snippet = message?.text ? String(message.text).replace(/\s+/g, ' ').slice(0, 60) : ''
+  return (
+    <div className="mod-row mod-row-stack">
+      <div className="mod-main">
+        {message ? (
+          <>
+            <span className="mod-nick">{message.nick || 'anon'}</span>
+            <span className="mod-snippet">{snippet || '(no text)'}</span>
+          </>
+        ) : (
+          <span className="mod-snippet dim">Message not loaded in this session</span>
+        )}
+        <a className="mod-addr" href={`https://solscan.io/tx/${sig}`}
+          target="_blank" rel="noreferrer noopener" title={sig}>{truncateAddress(sig, 8, 8)}</a>
+      </div>
+      <div className="mod-actions">
+        <button className="mod-undo" onClick={() => onUnhide(sig)}>Restore</button>
+        <button className="mod-undo" onClick={() => onArchive(sig)}>Remove from list</button>
+      </div>
+    </div>
   )
 }
 
@@ -1644,7 +1850,217 @@ function NotificationSettings({ settings, updateSettings }) {
   )
 }
 
-function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalBurned, onResetGoal, wallet, moderation, onUnbanSender, onUnhideMessage, onClearModeration }) {
+/**
+ * Burn goals.
+ *
+ * Several goals run side by side and are counted independently from the same
+ * stream of burns, so a single burn can move more than one bar — a long-running
+ * community target and a "tonight only" one, or separate keyword-gated pots,
+ * no longer have to take turns. Each goal owns its title, target, keywords,
+ * celebration text and pause switch; the master toggle and the title size are
+ * shared, because they describe the strip of bars as a whole.
+ */
+function GoalsSettings({ settings, updateSettings, goalProgress, onResetGoal, onResetAllGoals }) {
+  const goals = settings.goals || []
+  // Only one goal is expanded at a time — eight fully-expanded forms would bury
+  // everything below them in Settings.
+  const [openId, setOpenId] = useState(goals.length === 1 ? goals[0].id : null)
+
+  const patchGoal = (id, patch) =>
+    updateSettings({ goals: goals.map(g => (g.id === id ? { ...g, ...patch } : g)) })
+
+  const addGoal = () => {
+    if (goals.length >= MAX_GOALS) return
+    const g = makeGoal({ text: DEFAULT_GOAL_TEXT })
+    updateSettings({ goals: [...goals, g] })
+    setOpenId(g.id)
+  }
+
+  const removeGoal = (id) => {
+    updateSettings({ goals: goals.filter(g => g.id !== id) })
+    if (openId === id) setOpenId(null)
+  }
+
+  const titleSize = settings.goalTitleSize ?? 13
+
+  return (
+    <div className="settings-section">
+      <h3>Burn goals</h3>
+      <ToggleRow label="Show burn-goal progress bars" checked={settings.goalEnabled}
+        onChange={v => updateSettings({ goalEnabled: v })} />
+      <span className="form-hint">
+        Each goal starts counting the moment you create it — burns already in the chat never
+        count. Totals are kept between app restarts. Switching this off hides every bar and
+        freezes every total; burns landing while it's off are skipped for good, exactly like
+        pausing a single goal.
+      </span>
+      <span className="form-hint">
+        Run up to {MAX_GOALS} goals at once. They all watch the same burns, so one burn can push
+        several bars forward — unless a goal has keywords that the message doesn't match.
+      </span>
+
+      {goals.length === 0 && (
+        <span className="form-hint">No goals yet. Add one to show a progress bar in the chat.</span>
+      )}
+
+      <div className="goal-cards">
+        {goals.map((g, i) => (
+          <GoalEditor key={g.id} goal={g} index={i}
+            burned={goalBurnedFor(goalProgress, g.id)}
+            open={openId === g.id}
+            onToggleOpen={() => setOpenId(openId === g.id ? null : g.id)}
+            onPatch={patch => patchGoal(g.id, patch)}
+            onRemove={() => removeGoal(g.id)}
+            onReset={() => onResetGoal(g.id)} />
+        ))}
+      </div>
+
+      <button className="btn btn-secondary" style={{ width: '100%', marginTop: 12 }}
+        onClick={addGoal} disabled={goals.length >= MAX_GOALS}>
+        {goals.length >= MAX_GOALS ? `Limit of ${MAX_GOALS} goals reached` : '+ Add a goal'}
+      </button>
+
+      {goals.length > 0 && (
+        <>
+          <div className="form-group" style={{ marginTop: 20 }}>
+            <label className="form-label">Title size on every bar (px): {titleSize}</label>
+            <input type="range" min={GOAL_TITLE_SIZE_MIN} max={GOAL_TITLE_SIZE_MAX} step="1"
+              value={titleSize}
+              onChange={e => updateSettings({
+                goalTitleSize: Math.min(GOAL_TITLE_SIZE_MAX, Math.max(GOAL_TITLE_SIZE_MIN, parseInt(e.target.value, 10)))
+              })} />
+            <div className="goal-title-preview" style={{ fontSize: titleSize }}>
+              <span className="goal-bar-title-ic">{Icon.fire}</span>
+              <span className="goal-bar-title-text">
+                {(goals[0]?.title || '').trim() || 'Burn goal'}
+              </span>
+            </div>
+          </div>
+          <button className="convert-sol-btn" onClick={onResetAllGoals}>
+            Reset progress on every goal
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
+
+function GoalEditor({ goal, index, burned, open, onToggleOpen, onPatch, onRemove, onReset }) {
+  // Local buffer so the amount field can be typed into freely (including a
+  // comma decimal) without the parsed number snapping it back mid-entry.
+  const [targetStr, setTargetStr] = useState(goal.target ? String(goal.target) : '')
+  const [confirmRemove, setConfirmRemove] = useState(false)
+
+  const onTarget = (raw) => {
+    const v = sanitizeDecimal(raw)
+    setTargetStr(v)
+    const n = parseFloat(v)
+    onPatch({ target: isNaN(n) ? 0 : Math.max(0, n) })
+  }
+
+  const target = Number(goal.target) || 0
+  const total = burned > 0 ? burned : 0
+  const pct = target > 0 ? Math.min(100, (total / target) * 100) : 0
+  const label = (goal.title || '').trim() || `Goal ${index + 1}`
+
+  return (
+    <div className={`goal-card ${goal.paused ? 'paused' : ''}`}>
+      <button className="goal-card-head" onClick={onToggleOpen} aria-expanded={open}>
+        <span className="goal-card-name">
+          {label}
+          {goal.paused && <span className="goal-bar-paused">paused</span>}
+          {target <= 0 && <span className="goal-card-warn">no target</span>}
+        </span>
+        <span className="goal-card-meta">
+          {target > 0 ? `${pct.toFixed(pct < 10 ? 2 : 1)}%` : '—'}
+          <span className="arrow">{open ? '⌃' : '⌄'}</span>
+        </span>
+      </button>
+
+      {open && (
+        <div className="goal-card-body">
+          <div className="form-group">
+            <label className="form-label">Title (shown on the bar in chat)</label>
+            <input className="form-input" type="text" maxLength={GOAL_TITLE_MAX}
+              placeholder="Burn goal"
+              value={goal.title || ''}
+              onChange={e => onPatch({ title: e.target.value.slice(0, GOAL_TITLE_MAX) })} />
+            <span className="form-hint">
+              Name this round — e.g. “Road to 10M” or “Weekend burn”. Leave empty to show
+              “Burn goal”. Long titles wrap onto more lines inside the bar.
+              {` ${(goal.title || '').length}/${GOAL_TITLE_MAX}`}
+            </span>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Goal amount (h173k)</label>
+            <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
+              placeholder="e.g. 10000000"
+              value={targetStr} onChange={e => onTarget(e.target.value)}
+              onBlur={() => setTargetStr(goal.target ? String(goal.target) : '')} />
+            <span className="form-hint">A goal with no amount is not drawn in the chat.</span>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Keywords required to count (optional)</label>
+            <input className="form-input" type="text"
+              placeholder="e.g. #goal, road to 10m, charity"
+              value={goal.keywords || ''}
+              onChange={e => onPatch({ keywords: e.target.value.slice(0, GOAL_KEYWORDS_MAX) })} />
+            <span className="form-hint">
+              Comma-separated. A burn only counts toward <b>this</b> goal if its message contains
+              at least one of these, matched anywhere in the text and ignoring capitalisation.
+              Leave empty to count every burn. This is what lets two goals run side by side and
+              collect different burns.
+            </span>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Message shown when this goal is reached</label>
+            <textarea className="form-input" rows={2} value={goal.text || ''}
+              onChange={e => onPatch({ text: e.target.value.slice(0, 280) })} />
+          </div>
+
+          <ToggleRow label="Pause counting (keeps the current total)"
+            checked={!!goal.paused} onChange={v => onPatch({ paused: v })} />
+          <span className="form-hint">
+            Freezes this goal only. Burns arriving while it's paused are skipped for good —
+            resuming will not add them retroactively. Other goals keep counting.
+          </span>
+
+          <div className="form-group">
+            <label className="form-label">
+              Counted so far: {formatH173K(total)} h173k
+              {target > 0 ? ` (${pct.toFixed(1)}%)` : ''}
+            </label>
+            <button className="btn btn-secondary" onClick={onReset}>Reset this goal's progress</button>
+            <span className="form-hint">
+              Clears this goal's total and re-arms its celebration — a fresh round from now.
+            </span>
+          </div>
+
+          {!confirmRemove ? (
+            <button className="convert-sol-btn danger" onClick={() => setConfirmRemove(true)}>
+              Delete this goal
+            </button>
+          ) : (
+            <div className="delete-confirm">
+              <p className="warning-text">
+                Deleting removes the bar and its counted total. The burns themselves are untouched.
+              </p>
+              <div className="delete-actions">
+                <button className="btn btn-secondary" onClick={() => setConfirmRemove(false)}>Cancel</button>
+                <button className="btn btn-danger" onClick={onRemove}>Delete</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, onRpcChange, onLock, onBack, pubkey, h173kDecimals, goalProgress, onResetGoal, onResetAllGoals, wallet, moderation, onUnbanSender, onUnhideMessage, onClearModeration, onArchiveHidden, onArchiveAllHidden, onUnarchiveHidden, onUnhideArchived, messageIndex }) {
   const [nick, setNick] = useState(settings.nickname)
   const [addr, setAddr] = useState(burnAddress)
   const [addrErr, setAddrErr] = useState('')
@@ -1772,13 +2188,19 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
     setBurnAddress(addr.trim())
   }
 
+  // The endpoint can be changed but never cleared: the app is unusable without
+  // one, and an empty field here would drop the user back onto the public node
+  // silently. Same reason the setup gate has no skip.
   const saveRpc = async () => {
+    const v = rpc.trim()
+    if (!v) { setRpcMsg('An RPC endpoint is required — the app cannot read the chain without one.'); return }
+    if (!isRpcUrlShapeValid(v)) { setRpcMsg('That does not look like a URL — it should start with https://'); return }
     setRpcMsg('Checking…')
-    const ok = await validateRpcEndpoint(rpc.trim())
-    saveRpcEndpoint(rpc.trim())
+    const ok = await validateRpcEndpoint(v)
+    saveRpcEndpoint(v)
     onRpcChange()
     setRpcMsg(ok ? 'Saved ✓' : 'Saved (could not verify health)')
-    setTimeout(() => setRpcMsg(''), 3000)
+    setTimeout(() => setRpcMsg(''), 4000)
   }
 
   const saveRep = (patch) => {
@@ -1905,75 +2327,9 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         </div>
       </div>
 
-      {/* Burn goal */}
-      <div className="settings-section">
-        <h3>Burn goal</h3>
-        <ToggleRow label="Show burn-goal progress bar" checked={settings.goalEnabled}
-          onChange={v => updateSettings({ goalEnabled: v })} />
-        <span className="form-hint">Counting starts when you enable the goal — burns already in the chat don't count. The total is kept between app restarts. Switching the goal off hides the bar and freezes the total; burns that land while it's off are skipped for good, exactly like pausing.</span>
-        <div className="form-group">
-          <label className="form-label">Goal title (shown on the bar in chat)</label>
-          <input className="form-input" type="text" maxLength={GOAL_TITLE_MAX}
-            placeholder="Burn goal"
-            value={settings.goalTitle || ''}
-            onChange={e => updateSettings({ goalTitle: e.target.value.slice(0, GOAL_TITLE_MAX) })} />
-          <span className="form-hint">
-            Name this round — e.g. “Road to 10M” or “Weekend burn”. Leave empty to show “Burn goal”.
-            Long titles wrap onto more lines inside the bar.
-            {` ${(settings.goalTitle || '').length}/${GOAL_TITLE_MAX}`}
-          </span>
-        </div>
-        <div className="form-group">
-          <label className="form-label">Goal title size (px): {settings.goalTitleSize ?? 13}</label>
-          <input type="range" min={GOAL_TITLE_SIZE_MIN} max={GOAL_TITLE_SIZE_MAX} step="1"
-            value={settings.goalTitleSize ?? 13}
-            onChange={e => updateSettings({
-              goalTitleSize: Math.min(GOAL_TITLE_SIZE_MAX, Math.max(GOAL_TITLE_SIZE_MIN, parseInt(e.target.value, 10)))
-            })} />
-          <div className="goal-title-preview" style={{ fontSize: settings.goalTitleSize ?? 13 }}>
-            <span className="goal-bar-title-ic">{Icon.fire}</span>
-            <span className="goal-bar-title-text">{(settings.goalTitle || '').trim() || 'Burn goal'}</span>
-          </div>
-        </div>
-        <div className="form-group">
-          <label className="form-label">Goal amount (h173k)</label>
-          <input className="form-input" type="number" min="0" step="any" value={settings.goalTarget || ''}
-            placeholder="e.g. 10000000"
-            onChange={e => updateSettings({ goalTarget: Math.max(0, parseFloat(e.target.value || '0')) })} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Message shown when the goal is reached</label>
-          <textarea className="form-input" rows={2} value={settings.goalText}
-            onChange={e => updateSettings({ goalText: e.target.value.slice(0, 280) })} />
-        </div>
-        <ToggleRow label="Pause counting (keeps the current total)"
-          checked={!!settings.goalPaused} onChange={v => updateSettings({ goalPaused: v })} />
-        <span className="form-hint">
-          Freezes the goal without clearing it. Burns that arrive while paused are skipped for
-          good — resuming will not add them retroactively. The target, the title and the total
-          counted so far all stay untouched.
-        </span>
-        <div className="form-group">
-          <label className="form-label">Keywords required to count (optional)</label>
-          <input className="form-input" type="text"
-            placeholder="e.g. #goal, road to 10m, charity"
-            value={settings.goalKeywords || ''}
-            onChange={e => updateSettings({ goalKeywords: e.target.value.slice(0, 200) })} />
-          <span className="form-hint">
-            Comma-separated. A burn only counts toward the goal if its message contains at least
-            one of these, matched anywhere in the text and ignoring capitalisation. Leave empty
-            to count every burn. Burns that don't match still appear in the chat as normal.
-          </span>
-        </div>
-        <div className="form-group">
-          <label className="form-label">
-            Counted so far: {formatH173K(goalBurned > 0 ? goalBurned : 0)} h173k
-            {settings.goalTarget > 0 ? ` (${Math.min(100, (Math.max(0, goalBurned) / settings.goalTarget) * 100).toFixed(1)}%)` : ''}
-          </label>
-          <button className="btn btn-secondary" onClick={onResetGoal}>Reset progress</button>
-          <span className="form-hint">Clears the running total and re-arms the goal effect — start a fresh round from now.</span>
-        </div>
-      </div>
+      {/* Burn goals */}
+      <GoalsSettings settings={settings} updateSettings={updateSettings}
+        goalProgress={goalProgress} onResetGoal={onResetGoal} onResetAllGoals={onResetAllGoals} />
 
       {/* Special effect */}
       <div className="settings-section">
@@ -2090,8 +2446,10 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
       {/* Network */}
       <div className="settings-section">
         <h3>Moderation</h3>
-        <ModerationSettings moderation={moderation} onUnban={onUnbanSender}
-          onUnhide={onUnhideMessage} onClear={onClearModeration} />
+        <ModerationSettings moderation={moderation} messageIndex={messageIndex}
+          onUnban={onUnbanSender} onUnhide={onUnhideMessage} onClear={onClearModeration}
+          onArchiveHidden={onArchiveHidden} onArchiveAllHidden={onArchiveAllHidden}
+          onUnarchiveHidden={onUnarchiveHidden} onUnhideArchived={onUnhideArchived} />
 
         <h3>Notifications</h3>
         <NotificationSettings settings={settings} updateSettings={updateSettings} />
@@ -2104,7 +2462,10 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
             <button className="btn btn-secondary" onClick={saveRpc}>Save</button>
           </div>
           {rpcMsg && <span className="form-hint">{rpcMsg}</span>}
-          <span className="form-hint">Use your own (Helius/QuickNode/etc) for reliable listening.</span>
+          <span className="form-hint">
+            Required — the app reads the chain through it. Use your own (Helius/QuickNode/Alchemy/Ankr)
+            for reliable listening; the field can be changed but not left empty.
+          </span>
         </div>
       </div>
 

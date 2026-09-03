@@ -39,6 +39,21 @@ export function isRpcConfigured() {
   return false
 }
 
+/**
+ * Cheap, offline sanity check on what the user typed. Runs before we ever hit
+ * the network, so the setup gate can reject obvious nonsense ("helius.dev",
+ * "my rpc") without waiting on a request that was never going to work.
+ */
+export function isRpcUrlShapeValid(rpcUrl) {
+  const v = String(rpcUrl || '').trim()
+  if (!v) return false
+  try {
+    const u = new URL(v)
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
+    return !!u.hostname && u.hostname.includes('.')
+  } catch { return false }
+}
+
 export async function validateRpcEndpoint(rpcUrl) {
   try {
     const res = await fetch(rpcUrl, {
@@ -126,21 +141,59 @@ export const DEFAULT_CHAT_SETTINGS = {
   // ThresholdNotice, which also requires a non-zero threshold to render).
   thresholdNoticeEnabled: false,
   balanceRefreshSec: 20,      // how often balances are refreshed (0 = manual only)
-  // --- Burn goal (community burn target) ---
-  goalEnabled: false,         // show the goal progress bar + fire the goal effect
-  goalTarget: 0,              // target amount of h173k to burn (0 = unset)
-  goalTitle: '',              // heading on the progress bar in chat ('' = "Burn goal")
-  goalTitleSize: 13,          // px font size of that heading
-  goalPaused: false,          // freeze counting without clearing the progress;
-                              // messages arriving while paused never count, not
-                              // even retroactively once counting resumes
-  goalKeywords: '',           // comma-separated; a message must contain one of
-                              // these to count ('' = every message counts)
-  goalText: '🎉 Goal reached! We burned it all down. 🔥',
+  // --- Burn goals (community burn targets) ---
+  // More than one goal can run at the same time: a long-term target and a
+  // short "tonight only" one, or several keyword-gated pots side by side.
+  // Every goal counts independently from the same stream of burns, so one
+  // burn can move several bars at once.
+  goalEnabled: false,         // master switch: show the goal bars + fire the effects
+  goalTitleSize: 13,          // px font size of the heading on every bar
+  goals: [],                  // see makeGoal() for the shape of one entry
   // --- Desktop / mobile notifications ---
   notifyEnabled: false,       // master switch (also needs OS/browser permission)
   notifyMinAmount: 0,         // only notify for burns >= this many h173k (0 = all)
   notifyOnlyWhenHidden: true, // stay quiet while the user is looking at the chat
+}
+
+// ========== BURN GOALS (multiple) ==========
+export const MAX_GOALS = 8
+export const DEFAULT_GOAL_TEXT = '🎉 Goal reached! We burned it all down. 🔥'
+// Id of the goal that older single-goal configs are migrated into. Fixed so the
+// stored progress of that goal can be matched up with it (see migrateGoalProgress).
+export const LEGACY_GOAL_ID = 'legacy'
+
+let goalIdSeq = 0
+export function newGoalId() {
+  goalIdSeq += 1
+  return `g${Date.now().toString(36)}${goalIdSeq.toString(36)}`
+}
+
+/** One goal, with every field defaulted. */
+export function makeGoal(patch = {}) {
+  return {
+    id: patch.id || newGoalId(),
+    title: typeof patch.title === 'string' ? patch.title : '',
+    target: Number(patch.target) > 0 ? Number(patch.target) : 0,
+    keywords: typeof patch.keywords === 'string' ? patch.keywords : '',
+    text: typeof patch.text === 'string' && patch.text ? patch.text : DEFAULT_GOAL_TEXT,
+    paused: !!patch.paused,
+  }
+}
+
+/** Drop junk, force unique ids, enforce the cap. */
+export function normalizeGoals(list) {
+  if (!Array.isArray(list)) return []
+  const seen = new Set()
+  const out = []
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue
+    const g = makeGoal(raw)
+    if (seen.has(g.id)) g.id = newGoalId()
+    seen.add(g.id)
+    out.push(g)
+    if (out.length >= MAX_GOALS) break
+  }
+  return out
 }
 
 // The visibility floor must always sit strictly BELOW the effect threshold.
@@ -194,11 +247,14 @@ export const FX_DIM_MAX = 100
 // effect threshold of 1,000,000 h173k switched on for everyone, which — at a
 // few hundred dollars a token — told ordinary users they needed a fortune to
 // be seen. Anyone still carrying that untouched default is moved to "off".
-const SETTINGS_VERSION = 2
+// v3: the single burn goal became a list of goals. The old goalTarget /
+// goalTitle / goalKeywords / goalText / goalPaused fields are folded into one
+// entry with a fixed id, so its accumulated progress carries over untouched.
+const SETTINGS_VERSION = 3
 const LEGACY_FX_THRESHOLD = 1000000
 
 function migrateChatSettings(s) {
-  if (s.settingsVersion >= SETTINGS_VERSION) return s
+  if (s.settingsVersion >= SETTINGS_VERSION && Array.isArray(s.goals)) return s
   const next = { ...s, settingsVersion: SETTINGS_VERSION }
   // Only touch the value if it is exactly the old shipped default. A streamer
   // who deliberately chose a different number keeps it.
@@ -207,6 +263,29 @@ function migrateChatSettings(s) {
     next.fxThreshold = 0
     next.thresholdNoticeEnabled = false
   }
+  // The merge with DEFAULT_CHAT_SETTINGS always supplies a goals array, so its
+  // mere presence proves nothing — an *empty* one is what marks a config that
+  // still has its goal in the old flat fields.
+  if (!Array.isArray(next.goals) || next.goals.length === 0) {
+    // A config that never had a goal configured migrates to an empty list
+    // rather than to a blank placeholder goal.
+    const hadGoal = Number(next.goalTarget) > 0
+      || (typeof next.goalTitle === 'string' && next.goalTitle.trim())
+      || (typeof next.goalKeywords === 'string' && next.goalKeywords.trim())
+    next.goals = hadGoal ? [makeGoal({
+      id: LEGACY_GOAL_ID,
+      title: next.goalTitle,
+      target: next.goalTarget,
+      keywords: next.goalKeywords,
+      text: next.goalText,
+      paused: next.goalPaused,
+    })] : []
+  }
+  delete next.goalTarget
+  delete next.goalTitle
+  delete next.goalKeywords
+  delete next.goalText
+  delete next.goalPaused
   return next
 }
 
@@ -229,13 +308,18 @@ export function enforceThresholdOrder(s) {
 export function getChatSettings() {
   try {
     const stored = localStorage.getItem(CHAT_SETTINGS_KEY)
-    if (!stored) return { ...DEFAULT_CHAT_SETTINGS, settingsVersion: SETTINGS_VERSION }
+    if (!stored) return { ...DEFAULT_CHAT_SETTINGS, goals: [], settingsVersion: SETTINGS_VERSION }
     const merged = migrateChatSettings({ ...DEFAULT_CHAT_SETTINGS, ...JSON.parse(stored) })
+    merged.goals = normalizeGoals(merged.goals)
     return enforceThresholdOrder(merged)
-  } catch { return { ...DEFAULT_CHAT_SETTINGS, settingsVersion: SETTINGS_VERSION } }
+  } catch { return { ...DEFAULT_CHAT_SETTINGS, goals: [], settingsVersion: SETTINGS_VERSION } }
 }
 export function saveChatSettings(s) {
-  try { localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(enforceThresholdOrder(s))); return true } catch { return false }
+  try {
+    const next = enforceThresholdOrder({ ...s, goals: normalizeGoals(s.goals) })
+    localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(next))
+    return true
+  } catch { return false }
 }
 
 // ========== BURN GOAL PROGRESS (req: cumulative across runs) ==========
@@ -248,11 +332,17 @@ const GOAL_PROGRESS_KEY = 'h173kbc_goal_progress'
 const COUNTED_CAP = 5000
 
 export const DEFAULT_GOAL_PROGRESS = {
-  burned: 0,        // total h173k counted toward the goal
-  reached: false,   // has the goal effect already been shown for the current target
-  lastTarget: 0,    // the target the `reached` flag refers to
-  started: false,   // has the baseline been set (counting starts when the goal is enabled)
-  counted: [],      // signatures already added to `burned`
+  // Signatures already processed, shared by every goal. A burn is examined
+  // once and offered to all goals in the same pass, so one list is enough and
+  // adding a goal later can never back-fill it with the old backlog.
+  seen: [],
+  // Per-goal totals, keyed by goal id:
+  //   { burned, reached, lastTarget, started }
+  goals: {},
+}
+
+export function makeGoalState(target = 0) {
+  return { burned: 0, reached: false, lastTarget: Number(target) || 0, started: false }
 }
 
 // Keep only the newest `cap` items of an array (drops the oldest).
@@ -261,15 +351,56 @@ export function capList(arr, cap = COUNTED_CAP) {
   return arr.length > cap ? arr.slice(arr.length - cap) : arr
 }
 
+/**
+ * Bring a stored progress blob up to the multi-goal shape. A pre-1.20 entry
+ * has its running total kept and re-filed under LEGACY_GOAL_ID — the same id
+ * the settings migration gives the goal it came from — so an in-flight goal
+ * does not lose its progress when the app updates.
+ */
+function migrateGoalProgress(raw) {
+  if (!raw || typeof raw !== 'object') return { seen: [], goals: {} }
+  if (raw.goals && typeof raw.goals === 'object' && !Array.isArray(raw.goals)) {
+    return {
+      seen: Array.isArray(raw.seen) ? raw.seen : [],
+      goals: raw.goals,
+    }
+  }
+  return {
+    seen: Array.isArray(raw.counted) ? raw.counted : [],
+    goals: raw.started ? {
+      [LEGACY_GOAL_ID]: {
+        burned: Number(raw.burned) > 0 ? Number(raw.burned) : 0,
+        reached: !!raw.reached,
+        lastTarget: Number(raw.lastTarget) || 0,
+        started: true,
+      },
+    } : {},
+  }
+}
+
 export function getGoalProgress() {
   try {
     const stored = localStorage.getItem(GOAL_PROGRESS_KEY)
-    if (!stored) return { ...DEFAULT_GOAL_PROGRESS }
-    const p = { ...DEFAULT_GOAL_PROGRESS, ...JSON.parse(stored) }
-    if (!Array.isArray(p.counted)) p.counted = []
-    if (!(p.burned >= 0)) p.burned = 0
-    return p
-  } catch { return { ...DEFAULT_GOAL_PROGRESS } }
+    if (!stored) return { seen: [], goals: {} }
+    const p = migrateGoalProgress(JSON.parse(stored))
+    const goals = {}
+    for (const [id, st] of Object.entries(p.goals || {})) {
+      if (!st || typeof st !== 'object') continue
+      goals[id] = {
+        burned: Number(st.burned) > 0 ? Number(st.burned) : 0,
+        reached: !!st.reached,
+        lastTarget: Number(st.lastTarget) || 0,
+        started: !!st.started,
+      }
+    }
+    return { seen: Array.isArray(p.seen) ? p.seen : [], goals }
+  } catch { return { seen: [], goals: {} } }
+}
+
+/** Total burned toward one goal, 0 when it hasn't started counting. */
+export function goalBurnedFor(progress, goalId) {
+  const st = progress?.goals?.[goalId]
+  return st && st.burned > 0 ? st.burned : 0
 }
 export function saveGoalProgress(p) {
   try { localStorage.setItem(GOAL_PROGRESS_KEY, JSON.stringify(p)); return true } catch { return false }
@@ -352,16 +483,22 @@ export function saveReplenishSettings(s) {
 const MODERATION_KEY = 'h173kbc_moderation'
 const MODERATION_CAP = 2000
 
+// `hidden` is what Settings lists and offers to restore. `hiddenArchived` holds
+// signatures the user cleared off that list without un-hiding them: still
+// filtered out of the chat, just no longer cluttering the review screen. A busy
+// broadcaster hides dozens of messages a stream, and the list is only useful
+// while it is short enough to read.
 export function getModeration() {
   try {
     const stored = localStorage.getItem(MODERATION_KEY)
-    if (!stored) return { banned: [], hidden: [] }
+    if (!stored) return { banned: [], hidden: [], hiddenArchived: [] }
     const m = JSON.parse(stored)
     return {
       banned: Array.isArray(m.banned) ? m.banned : [],
       hidden: Array.isArray(m.hidden) ? m.hidden : [],
+      hiddenArchived: Array.isArray(m.hiddenArchived) ? m.hiddenArchived : [],
     }
-  } catch { return { banned: [], hidden: [] } }
+  } catch { return { banned: [], hidden: [], hiddenArchived: [] } }
 }
 
 export function saveModeration(m) {
@@ -369,9 +506,19 @@ export function saveModeration(m) {
     localStorage.setItem(MODERATION_KEY, JSON.stringify({
       banned: (m.banned || []).slice(-MODERATION_CAP),
       hidden: (m.hidden || []).slice(-MODERATION_CAP),
+      hiddenArchived: (m.hiddenArchived || []).slice(-MODERATION_CAP),
     }))
     return true
   } catch { return false }
+}
+
+/**
+ * Every signature the chat must filter out — the listed ones and the ones
+ * dismissed from the list. Both stay invisible; only their presence in the
+ * Settings list differs.
+ */
+export function allHiddenSignatures(m) {
+  return new Set([...(m?.hidden || []), ...(m?.hiddenArchived || [])])
 }
 
 /** Ban a sender address. Returns the updated moderation state. */
@@ -393,22 +540,78 @@ export function unbanSender(address) {
 /** Hide a single message by transaction signature. */
 export function hideMessage(signature) {
   const m = getModeration()
-  if (!signature || m.hidden.includes(signature)) return m
+  if (!signature) return m
+  if (m.hidden.includes(signature) || m.hiddenArchived.includes(signature)) return m
   const next = { ...m, hidden: [...m.hidden, signature] }
   saveModeration(next)
   return next
 }
 
+/** Make a message visible again — clears it from both hidden lists. */
 export function unhideMessage(signature) {
   const m = getModeration()
-  const next = { ...m, hidden: m.hidden.filter(s => s !== signature) }
+  const next = {
+    ...m,
+    hidden: m.hidden.filter(s => s !== signature),
+    hiddenArchived: m.hiddenArchived.filter(s => s !== signature),
+  }
+  saveModeration(next)
+  return next
+}
+
+/**
+ * Take one entry off the Settings list while leaving the message hidden in
+ * chat. Deliberately not the same as restoring: the moderation decision
+ * stands, only the reminder of it goes away.
+ */
+export function archiveHiddenMessage(signature) {
+  const m = getModeration()
+  if (!signature || !m.hidden.includes(signature)) return m
+  const next = {
+    ...m,
+    hidden: m.hidden.filter(s => s !== signature),
+    hiddenArchived: m.hiddenArchived.includes(signature)
+      ? m.hiddenArchived
+      : [...m.hiddenArchived, signature],
+  }
+  saveModeration(next)
+  return next
+}
+
+/** Same, for the whole list at once. */
+export function archiveAllHiddenMessages() {
+  const m = getModeration()
+  if (!m.hidden.length) return m
+  const merged = [...m.hiddenArchived]
+  for (const s of m.hidden) if (!merged.includes(s)) merged.push(s)
+  const next = { ...m, hidden: [], hiddenArchived: merged }
+  saveModeration(next)
+  return next
+}
+
+/** Bring every dismissed entry back onto the list (still hidden in chat). */
+export function unarchiveHiddenMessages() {
+  const m = getModeration()
+  if (!m.hiddenArchived.length) return m
+  const merged = [...m.hidden]
+  for (const s of m.hiddenArchived) if (!merged.includes(s)) merged.push(s)
+  const next = { ...m, hidden: merged, hiddenArchived: [] }
+  saveModeration(next)
+  return next
+}
+
+/** Un-hide everything that was dismissed from the list. */
+export function unhideArchivedMessages() {
+  const m = getModeration()
+  const next = { ...m, hiddenArchived: [] }
   saveModeration(next)
   return next
 }
 
 export function clearModeration() {
-  saveModeration({ banned: [], hidden: [] })
-  return { banned: [], hidden: [] }
+  const empty = { banned: [], hidden: [], hiddenArchived: [] }
+  saveModeration(empty)
+  return empty
 }
 
 const H173K_DECIMALS_KEY = 'h173kbc_display_decimals'

@@ -3234,9 +3234,54 @@ body {
 .goal-bar-burned { font-weight: var(--font-bold); color: var(--color-white); }
 .goal-bar-target { font-size: 12px; }
 
+/* Several goals stack above the chat; the bar's own bottom margin does the
+   spacing, so the wrapper only has to strip it off the last one. */
+.goal-bars > .goal-bar:last-child { margin-bottom: 14px; }
+.goal-bars > .goal-bar { margin-bottom: 10px; }
+
 /* ---- Burn goal: reached effect ---- */
 .fx-overlay.goal-fx .fx-amount { color: #5fe39a; text-shadow: 0 0 24px rgba(40,220,130,0.7); }
 .fx-overlay.goal-fx .fx-label { color: #7af0b0; }
+/* With more than one goal running, the celebration has to name the one that
+   landed — otherwise the audience can't tell which bar just filled. */
+.fx-goal-title {
+  font-size: 22px; font-weight: var(--font-bold); color: #7af0b0;
+  margin-bottom: 4px; line-height: 1.25;
+  overflow-wrap: anywhere; word-break: break-word;
+}
+
+/* ---- Burn goals: settings cards ---- */
+.goal-cards { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.goal-card {
+  border: 1px solid rgba(255,140,40,0.28); border-radius: var(--border-radius-md);
+  background: rgba(255,122,26,0.05); overflow: hidden;
+}
+.goal-card.paused { border-color: var(--color-white-20); background: var(--color-white-05); }
+.goal-card-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  padding: 12px 14px; border: none; background: transparent; cursor: pointer;
+  font-family: inherit; font-size: 14px; color: var(--color-white); text-align: left;
+}
+.goal-card-name {
+  display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0;
+  font-weight: var(--font-bold); color: #ffce8a;
+  overflow-wrap: anywhere; word-break: break-word;
+}
+.goal-card.paused .goal-card-name { color: var(--color-white-70); }
+.goal-card-meta {
+  display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+  font-size: 13px; font-weight: var(--font-bold); color: #ffae42;
+}
+.goal-card-meta .arrow { color: var(--color-white-50); font-weight: var(--font-regular); }
+.goal-card-warn {
+  flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 2px 7px; border-radius: 999px;
+  color: var(--color-warning); border: 1px solid rgba(251,191,36,0.4);
+  background: rgba(251,191,36,0.10);
+}
+.goal-card-body { padding: 0 14px 14px; border-top: 1px solid var(--color-white-10); padding-top: 12px; }
+.convert-sol-btn.danger { color: var(--color-error); border-color: rgba(248,113,113,0.45); }
+.convert-sol-btn.danger:hover { border-color: var(--color-error); }
 
 /* nickname preview in settings */
 .goal-title-preview {
@@ -3509,3 +3554,15 @@ a.mod-addr:hover { color: #ffae42; }
   font-size: 12px; cursor: pointer;
 }
 .mod-undo:hover { border-color: rgba(255, 140, 40, 0.6); color: #ffae42; }
+
+/* Hidden-message rows carry a nickname, a snippet and two actions, which no
+   longer fit on one line on a phone — so they stack. */
+.mod-row-stack { flex-direction: column; align-items: stretch; gap: 8px; }
+.mod-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.mod-nick { font-size: 13px; font-weight: var(--font-bold); color: var(--color-white); }
+.mod-snippet {
+  font-size: 12px; color: var(--color-white-70); line-height: 1.4;
+  overflow-wrap: anywhere; word-break: break-word;
+}
+.mod-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.mod-actions .mod-undo { flex: 1 1 auto; text-align: center; }
