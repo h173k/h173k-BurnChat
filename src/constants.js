@@ -156,11 +156,15 @@ export const SORT_LARGEST = 'largest'
 export const UNIT_H173K = 'h173k'
 export const UNIT_USDT = 'usdt'
 
+// Visibility floor. Sits just under DEFAULT_DRAFT_AMOUNT so a burn made with
+// the prefilled amount always clears it, while true dust does not.
+export const DEFAULT_MIN_BURN_FILTER = 0.0000099
+
 export const DEFAULT_CHAT_SETTINGS = {
   nickname: '',
   sort: SORT_NEWEST,          // newest | largest
   fetchLimit: 50,             // how many recent messages to pull from API on load (req 11/18)
-  minBurnFilter: 0,           // only show messages >= this burn (in h173k) (req 8)
+  minBurnFilter: DEFAULT_MIN_BURN_FILTER, // only show messages >= this burn (in h173k) (req 8)
   displayUnit: UNIT_H173K,    // h173k | usdt (req 14)
   // Thresholds default to "off". They are a broadcaster feature: a streamer
   // decides what a message has to be worth to reach their audience. A regular
@@ -291,7 +295,10 @@ export const FX_DIM_MAX = 100
 // v3: the single burn goal became a list of goals. The old goalTarget /
 // goalTitle / goalKeywords / goalText / goalPaused fields are folded into one
 // entry with a fixed id, so its accumulated progress carries over untouched.
-const SETTINGS_VERSION = 3
+// v4: the visibility floor gained a non-zero default. Only a config that never
+// set one (0 = "show everything") is moved up to it; any floor the user chose
+// themselves is left exactly as it is.
+const SETTINGS_VERSION = 4
 const LEGACY_FX_THRESHOLD = 1000000
 
 function migrateChatSettings(s) {
@@ -327,6 +334,7 @@ function migrateChatSettings(s) {
   delete next.goalKeywords
   delete next.goalText
   delete next.goalPaused
+  if (!(Number(next.minBurnFilter) > 0)) next.minBurnFilter = DEFAULT_MIN_BURN_FILTER
   return next
 }
 
