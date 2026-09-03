@@ -10,8 +10,26 @@ export const BUILD_TIME =
 
 // ========== NETWORK ==========
 export const NETWORK = 'mainnet-beta'
-// Public default RPC. Strongly recommend setting your own in Settings (Helius/QuickNode/etc).
+// Solana's own public endpoint. Kept only so it can be recognised and refused:
+// it sends no CORS headers a browser will accept and rate-limits hard, so from
+// an installed PWA it simply does not work. Every code path below rejects it.
 export const DEFAULT_RPC_ENDPOINT = 'https://api.mainnet-beta.solana.com'
+
+// Hosts that are Solana's free public nodes rather than somebody's endpoint.
+const PUBLIC_RPC_HOSTS = [
+  'api.mainnet-beta.solana.com',
+  'api.devnet.solana.com',
+  'api.testnet.solana.com',
+  'solana-api.projectserum.com',
+]
+
+/** Is this one of the public nodes the app cannot actually use? */
+export function isPublicRpc(rpcUrl) {
+  try {
+    const host = new URL(String(rpcUrl || '').trim()).hostname.toLowerCase()
+    return PUBLIC_RPC_HOSTS.includes(host)
+  } catch { return false }
+}
 
 const RPC_SETTINGS_KEY = 'h173kbc_rpc_settings'
 
@@ -27,14 +45,25 @@ export function getRpcEndpoint() {
 }
 
 export function saveRpcEndpoint(rpcUrl) {
+  // Last line of defence: the public node must never end up in storage, no
+  // matter which caller got there.
+  if (isPublicRpc(rpcUrl)) return false
   try { localStorage.setItem(RPC_SETTINGS_KEY, JSON.stringify({ rpcUrl })); return true }
   catch { return false }
 }
 
+/**
+ * A stored public endpoint counts as *not* configured, so an existing profile
+ * carrying one is sent back through the setup gate instead of being left on a
+ * node that cannot serve the app.
+ */
 export function isRpcConfigured() {
   try {
     const stored = localStorage.getItem(RPC_SETTINGS_KEY)
-    if (stored) { const s = JSON.parse(stored); return !!(s.rpcUrl && s.rpcUrl.trim()) }
+    if (stored) {
+      const s = JSON.parse(stored)
+      return !!(s.rpcUrl && s.rpcUrl.trim() && !isPublicRpc(s.rpcUrl))
+    }
   } catch {}
   return false
 }
@@ -43,10 +72,12 @@ export function isRpcConfigured() {
  * Cheap, offline sanity check on what the user typed. Runs before we ever hit
  * the network, so the setup gate can reject obvious nonsense ("helius.dev",
  * "my rpc") without waiting on a request that was never going to work.
+ * The public nodes fail here too — they are well-formed but unusable.
  */
 export function isRpcUrlShapeValid(rpcUrl) {
   const v = String(rpcUrl || '').trim()
   if (!v) return false
+  if (isPublicRpc(v)) return false
   try {
     const u = new URL(v)
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return false

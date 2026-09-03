@@ -5,8 +5,8 @@ import {
   requestNotificationPermission, showNotification,
 } from './notify'
 import {
-  getRpcEndpoint, saveRpcEndpoint, validateRpcEndpoint, DEFAULT_RPC_ENDPOINT,
-  isRpcConfigured, isRpcUrlShapeValid,
+  getRpcEndpoint, saveRpcEndpoint, validateRpcEndpoint,
+  isRpcConfigured, isRpcUrlShapeValid, isPublicRpc,
   getBurnAddress, saveBurnAddress, DEFAULT_BURN_ADDRESS,
   getDraftAmount, saveDraftAmount,
   getChatSettings, saveChatSettings,
@@ -249,9 +249,9 @@ export default function App() {
     }
     // The RPC endpoint is asked for before anything else — creating an account,
     // restoring one, or just unlocking. Without an endpoint of their own the
-    // app runs on the shared public node, which is rate-limited hard enough
-    // that the chat looks broken and burns silently fail. There is no way past
-    // this screen until one has been set at least once.
+    // app has nothing to talk to: Solana's public node is refused outright,
+    // because an installed PWA cannot call it from the browser. There is no way
+    // past this screen until a usable endpoint has been set.
     if (!isRpcConfigured()) { setAppState('rpc'); return }
     if (!walletExists() || !isPINSetup()) setAppState('onboard')
     else setAppState('locked')
@@ -327,6 +327,10 @@ function RpcGate({ onDone }) {
     if (busy) return
     setErr('')
     if (!url.trim()) { setErr('Enter your RPC endpoint to continue.'); return }
+    if (isPublicRpc(url)) {
+      setErr("Solana's public endpoint can't be used here — an installed app can't call it from the browser, and it's rate-limited on top of that. Use a provider endpoint of your own.")
+      return
+    }
     if (!shapeOk) { setErr('That does not look like a URL. It should start with https:// — paste the full endpoint from your provider.'); return }
     if (unverified) { save(); return }   // second press = "I know, use it anyway"
     setBusy(true)
@@ -349,8 +353,9 @@ function RpcGate({ onDone }) {
         <div className="onboarding-logo"><img src={LOGO} className="logo-img large" alt="" /></div>
         <h1 className="onboarding-title">Connect to Solana</h1>
         <p className="onboarding-subtitle">
-          Burn Chat reads and writes directly to the Solana network, so it needs an RPC endpoint.
-          Add your own — the free shared one is rate-limited and will make the chat stall.
+          Burn Chat reads and writes directly to the Solana network, so it needs an RPC endpoint
+          of your own. Solana's public node is not an option — an installed app can't reach it
+          from the browser.
         </p>
         <div className="form-group">
           <label className="form-label">RPC endpoint</label>
@@ -367,14 +372,6 @@ function RpcGate({ onDone }) {
         <button className="btn btn-action" disabled={busy || !url.trim()} onClick={submit}>
           {busy ? 'Checking…' : unverified ? 'Use this endpoint anyway' : 'Check & continue'}
         </button>
-        <button className="convert-sol-btn" style={{ marginTop: 12 }}
-          onClick={() => onChange(DEFAULT_RPC_ENDPOINT)}>
-          Use the public endpoint instead (not recommended)
-        </button>
-        <span className="form-hint" style={{ display: 'block', marginTop: 8 }}>
-          The public endpoint is fine for a quick look, but it drops requests under load — expect
-          missing messages and failed burns.
-        </span>
       </div>
     </div></div>
   )
@@ -990,12 +987,13 @@ function Main({ connection, onRpcChange, onLock }) {
     && wallet.solBalance < 0.0001 && wallet.h173kBalance <= 0
     && !depositDismissed
 
-  // RPC warning: the default public endpoint is heavily rate-limited, and any
-  // RPC error usually means the user must set their own endpoint. Surface a
-  // dismissible banner with a one-tap shortcut to the RPC settings (root cause
-  // of "app feels stuck right after creating an account").
+  // RPC warning: any RPC error usually means the endpoint needs changing.
+  // Surface a dismissible banner with a one-tap shortcut to the RPC settings
+  // (root cause of "app feels stuck right after creating an account"). The
+  // public-node case should be unreachable now that the setup gate refuses it,
+  // but the check stays as a safety net for a hand-edited localStorage entry.
   const [rpcBannerDismissed, setRpcBannerDismissed] = useState(false)
-  const usingDefaultRpc = getRpcEndpoint() === DEFAULT_RPC_ENDPOINT
+  const usingDefaultRpc = isPublicRpc(getRpcEndpoint())
   const showRpcBanner = view === 'chat' && !settings.watchOnly && !rpcBannerDismissed
     && (!!wallet.error || chat.status === 'error' || usingDefaultRpc)
 
@@ -1153,8 +1151,8 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
         <div className="rpc-banner">
           <div className="rpc-banner-text">
             {error || status === 'error'
-              ? 'Can’t reach the network. The public RPC is rate-limited — add your own RPC.'
-              : 'You’re on the public RPC (rate-limited). Add your own RPC for reliable live updates.'}
+              ? 'Can’t reach the network. Check your RPC endpoint in Settings.'
+              : 'You’re on Solana’s public node, which this app can’t use. Set your own RPC endpoint.'}
           </div>
           <div className="rpc-banner-actions">
             <button className="btn btn-small" onClick={onOpenSettings}>Open settings</button>
@@ -2194,6 +2192,10 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
   const saveRpc = async () => {
     const v = rpc.trim()
     if (!v) { setRpcMsg('An RPC endpoint is required — the app cannot read the chain without one.'); return }
+    if (isPublicRpc(v)) {
+      setRpcMsg("Solana's public endpoint can't be used from an installed app — use your own provider endpoint.")
+      return
+    }
     if (!isRpcUrlShapeValid(v)) { setRpcMsg('That does not look like a URL — it should start with https://'); return }
     setRpcMsg('Checking…')
     const ok = await validateRpcEndpoint(v)
@@ -2463,8 +2465,8 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
           </div>
           {rpcMsg && <span className="form-hint">{rpcMsg}</span>}
           <span className="form-hint">
-            Required — the app reads the chain through it. Use your own (Helius/QuickNode/Alchemy/Ankr)
-            for reliable listening; the field can be changed but not left empty.
+            Required — the app reads the chain through it. Use your own (Helius/QuickNode/Alchemy/Ankr).
+            Solana's public node is rejected: an installed app can't call it from the browser.
           </span>
         </div>
       </div>
