@@ -47,6 +47,26 @@ export function formatUSD(amount) {
   }).format(amount)
 }
 
+/**
+ * USD with enough precision to stay meaningful on very small amounts.
+ *
+ * formatUSD() bottoms out at 8 decimals, which is fine for balances but turns
+ * every small burn into "$0.00000000" — the default 0.00001 h173k is worth a
+ * tiny fraction of a cent. This keeps two significant digits however far down
+ * the value sits, then trims the trailing zeros.
+ */
+export function formatUSDPrecise(amount) {
+  if (amount === null || amount === undefined || isNaN(amount)) return null
+  const abs = Math.abs(amount)
+  if (abs === 0) return '$0.00'
+  if (abs >= 0.01) return formatUSD(amount)
+  const exp = Math.floor(Math.log10(abs))
+  const decimals = Math.min(18, Math.max(2, -exp + 1))
+  let s = amount.toFixed(decimals)
+  if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '')
+  return '$' + s
+}
+
 export function truncateAddress(addr, start = 4, end = 4) {
   if (!addr) return ''
   const s = String(addr)

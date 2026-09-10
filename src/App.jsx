@@ -41,7 +41,7 @@ import { getReferralFromURL, generateReferralLink } from './referral'
 import { useChatWallet } from './hooks/useChatWallet'
 import { useTokenPrice, formatLastUpdated } from './usePrice'
 import {
-  formatH173K, formatUSD, formatNumber, truncateAddress,
+  formatH173K, formatUSD, formatUSDPrecise, formatNumber, truncateAddress,
   byteLength, charLength, truncateToBytes, truncateToChars, timeAgo,
 } from './utils'
 import { QRCodeGenerator } from './components/QRCode'
@@ -1276,6 +1276,26 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
   const [maxBusy, setMaxBusy] = useState(false)
 
   const nick = settings.nickname || ''
+
+  /* Live USD value of the typed amount, priced from the h173k/USDT pool.
+     Shown only when there is both a positive amount and a known price — a
+     missing price leaves the field exactly as it was, with no placeholder. */
+  const usdText = useMemo(() => {
+    const n = parseFloat(String(amount).replace(',', '.'))
+    if (!(n > 0) || price?.price == null) return ''
+    return formatUSDPrecise(n * price.price) || ''
+  }, [amount, price?.price])
+
+  // A long amount pushes the suffix under the MAX button. Rather than let it
+  // be clipped mid-number, hide it once it stops fitting; it comes back as
+  // soon as the text is short enough again.
+  const usdOverlayRef = useRef(null)
+  const [usdFits, setUsdFits] = useState(true)
+  useEffect(() => {
+    const el = usdOverlayRef.current
+    if (!el) return
+    setUsdFits(el.scrollWidth <= el.clientWidth + 1)
+  }, [amount, usdText])
   const chars = charLength(text)
   const memoPreviewBytes = byteLength((nick ? nick + MEMO_SEP : '') + text)
 
@@ -1387,6 +1407,15 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
         <input className="form-input" type="text" inputMode="decimal" autoComplete="off"
           placeholder={burning ? 'Amount to burn (h173k)' : 'Amount to send (h173k)'}
           value={amount} onChange={e => onAmount(e.target.value)} />
+        {/* The USD value can't live inside an <input>, so it rides on a
+            transparent copy of the typed text laid over the field. That keeps
+            it glued to the number without measuring glyph widths by hand. */}
+        {usdText && (
+          <div className="amount-usd-overlay" ref={usdOverlayRef} aria-hidden="true">
+            <span className="amount-usd-ghost">{amount}</span>
+            <span className={`amount-usd${usdFits ? '' : ' hidden'}`}>{` (${usdText})`}</span>
+          </div>
+        )}
         <button className="max-btn" disabled={maxBusy} onClick={fillMax}>{maxBusy ? '…' : 'MAX'}</button>
       </div>
       <div className="composer-counts">
