@@ -156,6 +156,12 @@ export const SORT_LARGEST = 'largest'
 export const UNIT_H173K = 'h173k'
 export const UNIT_USDT = 'usdt'
 
+// Unit for the dimmed value shown beside the typed burn amount. Separate from
+// displayUnit on purpose: that one governs the whole chat, this one only the
+// preview in the composer field.
+export const PREVIEW_UNIT_USD = 'usd'
+export const PREVIEW_UNIT_SOL = 'sol'
+
 // Visibility floor. Sits just under DEFAULT_DRAFT_AMOUNT so a burn made with
 // the prefilled amount always clears it, while true dust does not.
 export const DEFAULT_MIN_BURN_FILTER = 0.0000099
@@ -165,6 +171,7 @@ export const DEFAULT_CHAT_SETTINGS = {
   sort: SORT_NEWEST,          // newest | largest
   fetchLimit: 50,             // how many recent messages to pull from API on load (req 11/18)
   minBurnFilter: DEFAULT_MIN_BURN_FILTER, // only show messages >= this burn (in h173k) (req 8)
+  amountPreviewUnit: PREVIEW_UNIT_USD, // unit of the ( … ) value in the amount field
   displayUnit: UNIT_H173K,    // h173k | usdt (req 14)
   // Thresholds default to "off". They are a broadcaster feature: a streamer
   // decides what a message has to be worth to reach their audience. A regular

@@ -67,6 +67,24 @@ export function formatUSDPrecise(amount) {
   return '$' + s
 }
 
+/**
+ * SOL with the same "stay meaningful when tiny" treatment as formatUSDPrecise.
+ * Stops at 9 decimals because a lamport is the smallest unit that exists;
+ * anything under half of one is reported as being below the floor rather than
+ * rounded away to a bare 0.
+ */
+export function formatSOLPrecise(amount) {
+  if (amount === null || amount === undefined || isNaN(amount)) return null
+  const abs = Math.abs(amount)
+  if (abs === 0) return '0 SOL'
+  if (abs < 5e-10) return '<0.000000001 SOL'
+  const exp = Math.floor(Math.log10(abs))
+  const decimals = abs >= 0.001 ? 4 : Math.min(9, Math.max(2, -exp + 1))
+  let s = amount.toFixed(decimals)
+  if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '')
+  return s + ' SOL'
+}
+
 export function truncateAddress(addr, start = 4, end = 4) {
   if (!addr) return ''
   const s = String(addr)

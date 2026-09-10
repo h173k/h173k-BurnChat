@@ -20,6 +20,7 @@ import {
   unhideArchivedMessages, allHiddenSignatures,
   TOKEN_TICKER, TOKEN_SYMBOL, MAX_TEXT_CHARS, MAX_MEMO_BYTES, MEMO_SEP,
   SORT_NEWEST, SORT_LARGEST, UNIT_H173K, UNIT_USDT,
+  PREVIEW_UNIT_USD, PREVIEW_UNIT_SOL,
   FX_NICK_SIZE_MIN, FX_NICK_SIZE_MAX, FX_DURATION_MIN, FX_DURATION_MAX,
   FX_TEXT_SIZE_MIN, FX_TEXT_SIZE_MAX, FX_VPOS_MIN, FX_VPOS_MAX,
   FX_DIM_MIN, FX_DIM_MAX, TICKER_SIZE_MIN, TICKER_SIZE_MAX,
@@ -36,12 +37,13 @@ import {
   checkBiometricSupport, isBiometricSetup, setupBiometric, authenticateBiometric, removeBiometric,
 } from './crypto/auth'
 import { useBurnChat } from './hooks/useBurnChat'
+import { useSolRate } from './useSolRate'
 import { accumulateGoals, resetOneGoal } from './goals'
 import { getReferralFromURL, generateReferralLink } from './referral'
 import { useChatWallet } from './hooks/useChatWallet'
 import { useTokenPrice, formatLastUpdated } from './usePrice'
 import {
-  formatH173K, formatUSD, formatUSDPrecise, formatNumber, truncateAddress,
+  formatH173K, formatUSD, formatUSDPrecise, formatSOLPrecise, formatNumber, truncateAddress,
   byteLength, charLength, truncateToBytes, truncateToChars, timeAgo,
 } from './utils'
 import { QRCodeGenerator } from './components/QRCode'
@@ -1074,7 +1076,7 @@ function Main({ connection, onRpcChange, onLock }) {
         <ChatView
           messages={visible} totalCount={allMessages.length}
           settings={settings} price={price} status={chat.status} loading={chat.loading} error={chat.error}
-          wallet={wallet} burnAddress={burnAddress} pubkey={pubkey}
+          wallet={wallet} connection={connection} burnAddress={burnAddress} pubkey={pubkey}
           onSent={onSent} showToast={showToast}
           goalProgress={goalProgress}
           needsDeposit={needsDeposit} onCloseDeposit={() => setDepositDismissed(true)}
@@ -1111,7 +1113,7 @@ function PriceTag({ price, tickerSize }) {
 }
 
 /* ---------------- Chat ---------------- */
-function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, burnAddress, pubkey, onSent, showToast, goalProgress, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount, onReplayFx, onHideMessage, onBanSender }) {
+function ChatView({ messages, totalCount, settings, price, status, loading, error, wallet, connection, burnAddress, pubkey, onSent, showToast, goalProgress, needsDeposit, onCloseDeposit, showRpcBanner, onDismissRpcBanner, onOpenSettings, draftText, setDraftText, draftAmount, setDraftAmount, onReplayFx, onHideMessage, onBanSender }) {
   const displayAmount = useCallback((amt) => {
     if (settings.displayUnit === UNIT_USDT && price.price != null) return formatUSD(amt * price.price)
     return `${formatH173K(amt)} ${TOKEN_TICKER}`
@@ -1191,6 +1193,7 @@ function ChatView({ messages, totalCount, settings, price, status, loading, erro
 
       {!settings.watchOnly && (
         <Composer wallet={wallet} settings={settings} burnAddress={burnAddress} price={price}
+          connection={connection}
           pubkey={pubkey} onSent={onSent} showToast={showToast}
           text={draftText} setText={setDraftText} amount={draftAmount} setAmount={setDraftAmount} />
       )}
@@ -1269,7 +1272,7 @@ function MessageRow({ m, displayAmount, mine, big, onReplay, onHide, onBan }) {
 }
 
 /* ---------------- Composer ---------------- */
-function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showToast, text, setText, amount, setAmount }) {
+function Composer({ wallet, settings, burnAddress, price, connection, pubkey, onSent, showToast, text, setText, amount, setAmount }) {
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState('')
   const [err, setErr] = useState('')
@@ -1277,14 +1280,22 @@ function Composer({ wallet, settings, burnAddress, price, pubkey, onSent, showTo
 
   const nick = settings.nickname || ''
 
-  /* Live USD value of the typed amount, priced from the h173k/USDT pool.
-     Shown only when there is both a positive amount and a known price — a
-     missing price leaves the field exactly as it was, with no placeholder. */
+  /* Live value of the typed amount, in whichever unit the user picked.
+     USD comes from the h173k/USDT pool feed; SOL from the h173k/WSOL swap pool
+     reserves. Shown only when there is both a positive amount and a known
+     rate — a missing rate leaves the field exactly as it was, with no
+     placeholder. */
+  const previewInSol = settings.amountPreviewUnit === PREVIEW_UNIT_SOL
+  const solRate = useSolRate(connection, previewInSol)
   const usdText = useMemo(() => {
     const n = parseFloat(String(amount).replace(',', '.'))
-    if (!(n > 0) || price?.price == null) return ''
+    if (!(n > 0)) return ''
+    if (previewInSol) {
+      return solRate > 0 ? (formatSOLPrecise(n * solRate) || '') : ''
+    }
+    if (price?.price == null) return ''
     return formatUSDPrecise(n * price.price) || ''
-  }, [amount, price?.price])
+  }, [amount, price?.price, previewInSol, solRate])
 
   // A long amount pushes the suffix under the MAX button. Rather than let it
   // be clipped mid-number, hide it once it stops fitting; it comes back as
@@ -2316,6 +2327,14 @@ function SettingsView({ settings, updateSettings, burnAddress, setBurnAddress, o
         <SegRow label="Show amounts as" value={settings.displayUnit}
           options={[[UNIT_H173K, 'h173k'], [UNIT_USDT, 'USDT']]}
           onChange={v => updateSettings({ displayUnit: v })} />
+        <SegRow label="Value beside the amount you type" value={settings.amountPreviewUnit}
+          options={[[PREVIEW_UNIT_USD, 'USD'], [PREVIEW_UNIT_SOL, 'SOL']]}
+          onChange={v => updateSettings({ amountPreviewUnit: v })} />
+        <span className="form-hint">
+          The dimmed figure in brackets next to what you type in the burn box. USD comes from the
+          h173k/USDT pool, SOL from the h173k/SOL pool the app swaps against. This only changes
+          that preview — it doesn't affect how amounts are shown in the chat.
+        </span>
         <div className="form-group">
           <label className="form-label">Load last N messages (from API)</label>
           <input className="form-input" type="number" min="1" max="1000" value={settings.fetchLimit}
